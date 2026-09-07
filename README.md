@@ -122,6 +122,22 @@ It reports the calibration diagnostics, warns when `z_std` has moved away from
 1 on the new set, and writes per-case predictions with 95% intervals. If the
 target column is missing it predicts anyway and skips the report.
 
+### Reading the training log
+
+```
+val_mae is in units of area_mm2; the bracketed value is the same error in the
+log-standardized space the loss works in
+epoch   2  alpha 1.00  train 0.5013  val_nll 1.1876  val_mae 1655 area_mm2  (0.749 sd)  z_std 0.799  *
+```
+
+`val_mae` is in the target's own units, so it can be compared against what the
+measurement is actually for; the bracketed figure is the same error in the
+standardized space the loss operates in, which is what the NLL and `z_std`
+refer to. `alpha` is the weight of the NLL term in the warmup schedule, and `*`
+marks a new best epoch. Epoch selection uses the standardized NLL, which is
+scale-free; it only starts once the warmup and ramp are over, since the NLL is
+not the objective before that.
+
 ### Field of view
 
 `--crop-size` is a fixed number of pixels at a fixed millimetre spacing, so the
@@ -269,7 +285,7 @@ resampled mask is an input cue, not the source of truth for the label.
 pytest
 ```
 
-126 tests covering resampling geometry against known slice positions, flipped
+127 tests covering resampling geometry against known slice positions, flipped
 direction cosines, border clamping, falloff continuity, the gating intensity
 domain, exact affine rotation on non-square images, the standardizer round
 trip, the loss schedule, and an end-to-end run of all three CLIs against real

@@ -107,6 +107,28 @@ def test_train_then_eval(cohort, tmp_path):
     assert "unrelated" in out.columns          # the original columns survive
 
 
+def test_epoch_log_reports_the_error_in_physical_units(cohort, tmp_path):
+    """A standardized MAE cannot be compared with clinical expectations."""
+    log = run("train.py", [
+        str(cohort), "area_mm2", str(tmp_path / "m.pt"),
+        "--image-col", "ct", "--mask-col", "seg", "--crop-size", "48",
+        "--epochs", "3", "--warmup-epochs", "1", "--ramp-epochs", "1",
+        "--batch-size", "4", "--val-frac", "0.34", "--device", "cpu",
+    ])
+    assert "val_mae is in units of area_mm2" in log
+    epochs = [ln for ln in log.splitlines() if ln.startswith("epoch ")]
+    assert len(epochs) == 3
+    for ln in epochs:
+        assert "area_mm2" in ln and "sd)" in ln
+    # the physical value must differ from the standardized one, and be on the
+    # scale of the targets themselves
+    val = float(epochs[0].split("val_mae")[1].split()[0])
+    sd = float(epochs[0].split("(")[1].split()[0])
+    assert val > 0 and val != pytest.approx(sd)
+    truth = pd.read_csv(cohort)["area_mm2"]
+    assert val < 10 * truth.max()
+
+
 def test_eval_without_the_target_column(cohort, tmp_path):
     model = tmp_path / "model.pt"
     run("train.py", [str(cohort), "area_mm2", str(model),

@@ -280,6 +280,10 @@ def main(argv=None):
         log_target=bool(args.log_target), target_power=args.target_power,
     )
 
+    unit = args.target
+    space = "log-standardized" if args.log_target else "standardized"
+    print(f"val_mae is in units of {unit}; the bracketed value is the same error "
+          f"in the {space} space the loss works in")
     best = {"nll": float("inf"), "epoch": -1}
     best_state = None
     settle = args.warmup_epochs + args.ramp_epochs   # NLL is only the objective here
@@ -299,16 +303,23 @@ def main(argv=None):
 
         mu_z, sigma_z, z_true = evaluate(model, val_loader, args.device)
         rep = uncertainty_report(mu_z, sigma_z, z_true)
+        # the same predictions in the units of the target, so the number on
+        # screen is one that can be compared with clinical expectations
+        rep_y = uncertainty_report(std.inverse_transform(mu_z),
+                                   std.inverse_transform(mu_z + sigma_z)
+                                   - std.inverse_transform(mu_z),
+                                   std.inverse_transform(z_true))
         mark = ""
         if epoch >= settle and rep["nll"] < best["nll"]:
             best = {"nll": rep["nll"], "epoch": epoch, "z_std": rep["z_std"],
-                    "mae_z": rep["mae"]}
+                    "mae_z": rep["mae"], "mae": rep_y["mae"]}
             best_state = {k: v.detach().cpu().clone()
                           for k, v in model.state_dict().items()}
             mark = "  *"
         print(f"epoch {epoch:3d}  alpha {crit.alpha(epoch):.2f}  "
               f"train {total / n:8.4f}  val_nll {rep['nll']:7.4f}  "
-              f"val_mae_z {rep['mae']:.4f}  z_std {rep['z_std']:.3f}{mark}",
+              f"val_mae {rep_y['mae']:9.4g} {unit}  "
+              f"({rep['mae']:.3f} sd)  z_std {rep['z_std']:.3f}{mark}",
               flush=True)
 
         if best["epoch"] >= 0 and epoch - best["epoch"] >= args.patience:
