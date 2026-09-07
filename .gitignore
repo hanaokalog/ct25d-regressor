@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# experiments
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+outputs/
+wandb/
+lightning_logs/
+
+# data -- never commit patient images
+data/
+*.nii
+*.nii.gz
+*.mha
+*.mhd
+*.nrrd
+*.dcm
+DICOM/
+
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ct25d-regressor"
+version = "0.1.0"
+description = "2.5D CT regression with mask-guided attention and predictive uncertainty"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Shouhei Hanaoka", email = "hanaokalog@gmail.com" }]
+keywords = ["medical-imaging", "computed-tomography", "regression",
+            "uncertainty", "attention", "pytorch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "SimpleITK>=2.2",
+    "torch>=2.0",
+    "pandas>=1.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/hanaokalog/ct25d-regressor"
+Issues = "https://github.com/hanaokalog/ct25d-regressor/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests import after pytest.importorskip on purpose, so the suite skips
+# cleanly when torch or SimpleITK is missing
+"tests/*" = ["E402"]
