@@ -122,6 +122,38 @@ It reports the calibration diagnostics, warns when `z_std` has moved away from
 1 on the new set, and writes per-case predictions with 95% intervals. If the
 target column is missing it predicts anyway and skips the report.
 
+### Field of view
+
+`--crop-size` is a fixed number of pixels at a fixed millimetre spacing, so the
+field of view is fixed too: **96 px at 0.78125 mm is 75 mm**. A structure wider
+than that is clipped, and clipping is silent — the mask channel simply stops at
+the patch edge, and the model is trained on a truncated structure against a
+full-size label.
+
+`crop.py` measures every structure and reports the patch size the cohort needs:
+
+```
+structure size in plane: median 27 mm, max 87 mm
+crop_size needed for train.py (at 0.78125 mm/px, gate 10 mm, augmentation):
+   50th percentile:   80 px (62 mm FOV, covers 55%)
+  100th percentile:  192 px (150 mm FOV, covers 100%)
+  --> use --crop-size 192 to fit every case
+```
+
+`train.py` then refuses to start if any mask reaches the patch border, naming
+the count and a size that would fit. `--allow-clipped` overrides it. The
+required size accounts for the structure's own extent, the largest zoom-in, the
+rotation swing, the gate band, and the translation — a 40 mm structure needs
+112 px, not 52.
+
+Two things to keep in mind when raising it. Compute grows quadratically, so 192
+px is four times the cost of 96. And `crop.py --for-crop-size` must be given
+the same value, or the disk crops will be too tight for the larger patch.
+
+Raising `--in-plane-mm` instead widens the field of view at constant cost but
+throws away detail, and it changes what the trained weights mean, so it is a
+cohort-level decision rather than something to tune per run.
+
 ### Multi-label files
 
 Label files may hold several structures as different integer values.
@@ -237,7 +269,7 @@ resampled mask is an input cue, not the source of truth for the label.
 pytest
 ```
 
-121 tests covering resampling geometry against known slice positions, flipped
+126 tests covering resampling geometry against known slice positions, flipped
 direction cosines, border clamping, falloff continuity, the gating intensity
 domain, exact affine rotation on non-square images, the standardizer round
 trip, the loss schedule, and an end-to-end run of all three CLIs against real

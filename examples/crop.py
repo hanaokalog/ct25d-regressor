@@ -170,6 +170,12 @@ def main(argv=None):
     out[args.mask_out_col] = [jobs[p][4] if results[p][1] is None else ""
                               for p in range(len(jobs))]
     out["crop_ok"] = [results[p][1] is None for p in range(len(jobs))]
+    out["mask_extent_mm"] = [
+        (results[p][0] or {}).get("extent_inplane_mm", float("nan"))
+        for p in range(len(jobs))]
+    out["required_crop_size"] = [
+        (results[p][0] or {}).get("required_crop_size", -1)
+        for p in range(len(jobs))]
 
     ok = [results[p][0] for p in range(len(jobs))
           if results[p][1] is None and results[p][0]]
@@ -188,6 +194,23 @@ def main(argv=None):
         r = np.array(reductions)
         print(f"volume reduction: median {np.median(r):.0f}x, "
               f"range {r.min():.0f}-{r.max():.0f}x")
+
+    need = np.array([s_["required_crop_size"] for s_ in ok
+                     if "required_crop_size" in s_])
+    if need.size:
+        ext = np.array([s_["extent_inplane_mm"] for s_ in ok
+                        if "extent_inplane_mm" in s_])
+        print(f"\nstructure size in plane: median {np.median(ext):.0f} mm, "
+              f"max {ext.max():.0f} mm")
+        print("crop_size needed for train.py "
+              f"(at {args.in_plane_mm} mm/px, gate 10 mm, augmentation):")
+        for q in (50, 90, 99, 100):
+            v = int(np.percentile(need, q))
+            covered = float((need <= v).mean()) * 100
+            print(f"  {q:3d}th percentile: {v:4d} px "
+                  f"({v * args.in_plane_mm:.0f} mm FOV, covers {covered:.0f}%)")
+        print(f"  --> use --crop-size {int(need.max())} to fit every case; "
+              f"a smaller value clips the largest structures silently")
     for pos, err in failures[:10]:
         print(f"  row {pos}: {err}")
     if len(failures) > 10:

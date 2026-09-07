@@ -4,6 +4,7 @@ All geometry is resolved in physical space, so oblique direction cosines,
 differing origins, and a mask stored on its own grid are handled correctly.
 """
 
+import math
 from collections.abc import Sequence
 from typing import Optional
 
@@ -13,8 +14,8 @@ import SimpleITK as sitk
 from .constants import AIR_HU, SLICE_GAP_MM, TARGET_INPLANE_MM
 
 __all__ = ["available_labels", "label_hit", "binarize_label", "find_center_slice",
-           "mask_area_mm2", "mask_centroid_index", "build_sample_sitk",
-           "build_samples_sitk"]
+           "mask_area_mm2", "mask_centroid_index", "mask_extent_mm",
+           "required_patch_size", "build_sample_sitk", "build_samples_sitk"]
 
 
 def available_labels(mask: sitk.Image, limit: int = 20) -> list:
@@ -129,6 +130,56 @@ def _resample_plane(
     out = sitk.Resample(sitk.Cast(image, sitk.sitkFloat32), ref, sitk.Transform(),
                         interpolator, float(default_value), sitk.sitkFloat32)
     return sitk.GetArrayFromImage(out)[0]           # (H, W)
+
+
+def mask_extent_mm(mask: sitk.Image, label_value: int = 1) -> tuple:
+    """
+    Physical size of the label's bounding box, as (x, y, z) in millimetres.
+
+    Measured along the image axes. What the patch has to hold is the in-plane
+    extent, max(x, y).
+    """
+    arr = sitk.GetArrayViewFromImage(mask)
+    hit = label_hit(arr, label_value)
+    if not hit.any():
+        _require_label(mask, label_value)
+    sx, sy, sz = mask.GetSpacing()
+    zz = np.flatnonzero(hit.any(axis=(1, 2)))
+    yy = np.flatnonzero(hit.any(axis=(0, 2)))
+    xx = np.flatnonzero(hit.any(axis=(0, 1)))
+    return (float((xx[-1] - xx[0] + 1) * sx),
+            float((yy[-1] - yy[0] + 1) * sy),
+            float((zz[-1] - zz[0] + 1) * sz))
+
+
+def required_patch_size(
+    extent_mm: float,
+    in_plane_mm: float = TARGET_INPLANE_MM,
+    gate_radius_mm: float = 10.0,
+    scale_max: float = 1.1,
+    rotate_deg: float = 5.0,
+    translate: float = 0.08,
+    multiple: int = 16,
+) -> int:
+    """
+    Smallest `crop_size` that still contains the structure after augmentation.
+
+    The patch is a fixed number of pixels at a fixed millimetre spacing, so its
+    physical field of view is fixed too -- 96 px at 0.78125 mm is 75 mm. A
+    structure wider than that is clipped, and clipping is silent: the mask
+    simply stops at the patch edge and the area the model sees is wrong.
+
+    The terms are the structure's own extent, the largest zoom-in, the corner
+    swing of the largest rotation, the gate band that should stay visible
+    around it, and the largest translation. Rounded up to a multiple of
+    `multiple` so the downsampling stages divide evenly.
+    """
+    half = 0.5 * float(extent_mm) * float(scale_max)
+    a = math.radians(rotate_deg)
+    half *= abs(math.cos(a)) + abs(math.sin(a))
+    half += float(gate_radius_mm)
+    px = 2.0 * half / float(in_plane_mm) / max(1e-6, 1.0 - 2.0 * translate)
+    return int(math.ceil(px / multiple) * multiple)
 
 
 def build_sample_sitk(

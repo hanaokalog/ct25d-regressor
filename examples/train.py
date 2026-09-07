@@ -34,6 +34,7 @@ from ct25d.checkpoint import build_model, save_checkpoint
 from ct25d.constants import CT_WINDOW, SLICE_GAP_MM, TARGET_INPLANE_MM
 from ct25d.data import SliceStackDataset
 from ct25d.gating import DistanceGate
+from ct25d.geometry import required_patch_size
 from ct25d.losses import WarmupHeteroscedasticLoss
 from ct25d.tabular import prepare_stacks, split_indices
 from ct25d.transforms import RandomAffine2D, TargetStandardizer
@@ -57,7 +58,10 @@ def parse_args(argv=None):
 
     g = p.add_argument_group("preprocessing")
     g.add_argument("--crop-size", type=int, default=96,
-                   help="patch side in resampled pixels")
+                   help="patch side in resampled pixels; 96 px at 0.78125 mm is "
+                        "a 75 mm field of view, so larger structures are clipped")
+    g.add_argument("--allow-clipped", action="store_true",
+                   help="train anyway when structures do not fit in the patch")
     g.add_argument("--n-slices", type=int, default=3)
     g.add_argument("--gap-mm", type=float, default=SLICE_GAP_MM)
     g.add_argument("--in-plane-mm", type=float, default=TARGET_INPLANE_MM)
@@ -139,6 +143,45 @@ def load_or_prepare(df, args):
     return stacks, kept
 
 
+def check_field_of_view(stacks, args):
+    """
+    A structure wider than the patch is clipped at the border, and nothing
+    downstream notices: the mask channel simply stops, and the model is trained
+    on a truncated structure against the full-size label. Detect it here, where
+    the mask for every case is already in memory.
+    """
+    mask = stacks[:, -1] > 0
+    touches = (mask[:, 0, :].any(1) | mask[:, -1, :].any(1)
+               | mask[:, :, 0].any(1) | mask[:, :, -1].any(1))
+    n = int(touches.sum())
+    fov = args.crop_size * args.in_plane_mm
+    if n == 0:
+        print(f"field of view: {args.crop_size} px = {fov:.0f} mm, "
+              f"every structure fits")
+        return
+
+    # how wide the surviving part is, as a lower bound on the true extent
+    widths = []
+    for i in np.flatnonzero(touches):
+        yy, xx = np.nonzero(mask[i])
+        widths.append(max(yy.max() - yy.min(), xx.max() - xx.min())
+                      * args.in_plane_mm)
+    need = required_patch_size(float(np.max(widths)), args.in_plane_mm,
+                               gate_radius_mm=max(args.gate_radius_mm, 0.0),
+                               scale_max=max(args.scale), rotate_deg=args.rotate_deg,
+                               translate=args.translate)
+    msg = (f"{n}/{len(stacks)} structures reach the edge of the "
+           f"{args.crop_size} px ({fov:.0f} mm) patch and are being clipped. "
+           f"The visible part is already {np.max(widths):.0f} mm wide, so the "
+           f"true extent is larger. Try --crop-size {need} or more; run "
+           f"crop.py to see the required size for the whole cohort.")
+    if args.allow_clipped:
+        print(f"[warn] {msg}")
+    else:
+        sys.exit(f"[error] {msg}\n"
+                 f"        Pass --allow-clipped to train anyway.")
+
+
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
@@ -168,6 +211,8 @@ def main(argv=None):
     stacks, kept = load_or_prepare(df, args)
     df = df.iloc[kept].reset_index(drop=True)
     targets = df[args.target].to_numpy(dtype=np.float64)
+
+    check_field_of_view(stacks, args)
 
     tr, va = split_indices(df, val_frac=args.val_frac, group_col=args.group_col,
                            split_col=args.split_col, seed=args.seed)

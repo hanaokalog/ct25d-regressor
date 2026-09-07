@@ -218,3 +218,77 @@ def test_cropped_csv_trains(tmp_path):
         capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     assert model.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Field of view
+# --------------------------------------------------------------------------- #
+def test_required_patch_size_grows_with_the_structure():
+    from ct25d.geometry import required_patch_size
+    assert required_patch_size(10) < required_patch_size(40)
+    assert required_patch_size(40) < required_patch_size(100)
+    # 96 px at 0.78125 mm is a 75 mm field of view, so a 75 mm structure needs
+    # considerably more than 96 px once the gate and augmentation are included
+    assert required_patch_size(75) > 96
+    assert required_patch_size(10) * 0.78125 > 10 + 2 * 10   # structure + gate
+
+
+def test_mask_extent_is_physical(tmp_path):
+    from ct25d.geometry import mask_extent_mm
+    ip, mp = make_big_case(tmp_path, i=20, inplane=0.72, radius_px=10.0)
+    ex, ey, ez = mask_extent_mm(sitk.ReadImage(str(mp)))
+    assert ex == pytest.approx(2 * 10.0 * 0.72, abs=1.5)
+    assert ey == pytest.approx(ex, abs=0.1)
+
+
+def test_crop_reports_the_size_the_patch_needs(tmp_path):
+    ip, mp = make_big_case(tmp_path, i=21, inplane=0.72, radius_px=30.0)
+    stats = crop_pair(ip, mp, tmp_path / "f_img.nii.gz", tmp_path / "f_seg.nii.gz",
+                      margin_mm=60.0)
+    assert stats["extent_inplane_mm"] == pytest.approx(2 * 30.0 * 0.72, abs=1.5)
+    assert stats["required_crop_size"] > 96          # 43 mm wide needs more
+
+
+def test_train_refuses_a_patch_that_clips_the_structure(tmp_path):
+    """The failure this guards against is silent: the mask just stops."""
+    rows = []
+    for i in range(4):
+        ip, mp = make_big_case(tmp_path, i=30 + i, inplane=0.72,
+                               label_at=(128, 128, 33), radius_px=45.0)
+        rows.append({"ct": str(ip), "seg": str(mp), "area_mm2": 100.0 + i})
+    csv = tmp_path / "big.csv"
+    pd.DataFrame(rows).to_csv(csv, index=False)
+
+    args = [str(csv), "area_mm2", str(tmp_path / "m.pt"),
+            "--image-col", "ct", "--mask-col", "seg", "--crop-size", "48",
+            "--epochs", "1", "--batch-size", "2", "--val-frac", "0.5",
+            "--device", "cpu"]
+    res = subprocess.run([sys.executable, str(EXAMPLES / "train.py"), *args],
+                         capture_output=True, text=True)
+    assert res.returncode != 0
+    combined = res.stdout + res.stderr
+    assert "clipped" in combined and "--crop-size" in combined
+    assert "--allow-clipped" in combined
+
+    res = subprocess.run(
+        [sys.executable, str(EXAMPLES / "train.py"), *args, "--allow-clipped"],
+        capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "[warn]" in res.stdout
+
+
+def test_train_is_quiet_when_everything_fits(tmp_path):
+    rows = []
+    for i in range(4):
+        ip, mp = make_big_case(tmp_path, i=40 + i, radius_px=5.0)
+        rows.append({"ct": str(ip), "seg": str(mp), "area_mm2": 100.0 + i})
+    csv = tmp_path / "small.csv"
+    pd.DataFrame(rows).to_csv(csv, index=False)
+    res = subprocess.run(
+        [sys.executable, str(EXAMPLES / "train.py"), str(csv), "area_mm2",
+         str(tmp_path / "m.pt"), "--image-col", "ct", "--mask-col", "seg",
+         "--crop-size", "64", "--epochs", "1", "--batch-size", "2",
+         "--val-frac", "0.5", "--device", "cpu"],
+        capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "every structure fits" in res.stdout

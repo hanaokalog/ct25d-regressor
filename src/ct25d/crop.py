@@ -25,7 +25,13 @@ import numpy as np
 import SimpleITK as sitk
 
 from .constants import SLICE_GAP_MM, TARGET_INPLANE_MM
-from .geometry import available_labels, binarize_label, label_hit
+from .geometry import (
+    available_labels,
+    binarize_label,
+    label_hit,
+    mask_extent_mm,
+    required_patch_size,
+)
 
 __all__ = ["required_margin_mm", "label_bbox_physical", "crop_pair"]
 
@@ -150,6 +156,7 @@ def crop_pair(
     """
     mask = sitk.ReadImage(str(mask_path))             # binary, cheap to read
     corners = label_bbox_physical(mask, label_value, margin_mm, margin_mm_z)
+    label_extent = mask_extent_mm(mask, label_value)
 
     img_size, img_ref = _file_geometry(str(image_path))
     start, extent = _index_region(img_ref, img_size, corners)
@@ -181,6 +188,10 @@ def crop_pair(
         "crop_start_vox": list(map(int, start)),
         "label_voxels": total,
         "labels_present": available_labels(mask),
+        "extent_mm": [round(v, 2) for v in label_extent],
+        "extent_inplane_mm": round(max(label_extent[0], label_extent[1]), 2),
+        "required_crop_size": required_patch_size(
+            max(label_extent[0], label_extent[1])),
     }
 
 
