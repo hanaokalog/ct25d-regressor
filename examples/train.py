@@ -61,7 +61,8 @@ def parse_args(argv=None):
     g.add_argument("--n-slices", type=int, default=3)
     g.add_argument("--gap-mm", type=float, default=SLICE_GAP_MM)
     g.add_argument("--in-plane-mm", type=float, default=TARGET_INPLANE_MM)
-    g.add_argument("--label-value", type=int, default=1)
+    g.add_argument("--label-value", type=int, default=1,
+                   help="value of the target structure in a multi-label file")
     g.add_argument("--window", type=float, nargs=2, default=list(CT_WINDOW),
                    metavar=("LO", "HI"))
     g.add_argument("--cache", type=Path, default=None,

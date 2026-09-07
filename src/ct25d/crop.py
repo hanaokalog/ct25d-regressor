@@ -25,6 +25,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from .constants import SLICE_GAP_MM, TARGET_INPLANE_MM
+from .geometry import available_labels, binarize_label, label_hit
 
 __all__ = ["required_margin_mm", "label_bbox_physical", "crop_pair"]
 
@@ -73,9 +74,11 @@ def label_bbox_physical(
     voxel size of the file it came from.
     """
     arr = sitk.GetArrayViewFromImage(mask)            # (z, y, x)
-    hit = np.asarray(arr == label_value)
+    hit = label_hit(arr, label_value)
     if not hit.any():
-        raise ValueError(f"no voxel with label {label_value} in the mask")
+        raise ValueError(
+            f"no voxel with label {label_value} in the mask; "
+            f"labels present: {available_labels(mask)}")
     zz = np.flatnonzero(hit.any(axis=(1, 2)))
     yy = np.flatnonzero(hit.any(axis=(0, 2)))
     xx = np.flatnonzero(hit.any(axis=(0, 1)))
@@ -131,6 +134,7 @@ def crop_pair(
     margin_mm: float = 40.0,
     margin_mm_z: float = 10.0,
     compress: bool = True,
+    binarize: bool = False,
 ) -> dict:
     """
     Write a cropped (image, mask) pair and return a summary of what happened.
@@ -139,6 +143,10 @@ def crop_pair(
     grid: the label is the ground truth the target was derived from, and
     resampling it here would quietly change its area. The two crops cover the
     same physical box, which is all the downstream code needs.
+
+    A multi-label file keeps all of its labels by default -- only the bounding
+    box is taken from `label_value` -- so one crop can serve several targets.
+    Pass binarize=True to write the selected label alone as 0/1.
     """
     mask = sitk.ReadImage(str(mask_path))             # binary, cheap to read
     corners = label_bbox_physical(mask, label_value, margin_mm, margin_mm_z)
@@ -150,9 +158,14 @@ def crop_pair(
     m_start, m_extent = _index_region(mask, mask.GetSize(), corners)
     mask_crop = sitk.RegionOfInterest(mask, m_extent, m_start)
 
-    kept = int(np.count_nonzero(
-        sitk.GetArrayViewFromImage(mask_crop) == label_value))
-    total = int(np.count_nonzero(sitk.GetArrayViewFromImage(mask) == label_value))
+    if binarize:
+        mask_crop = binarize_label(mask_crop, label_value)
+        kept = int(np.count_nonzero(sitk.GetArrayViewFromImage(mask_crop)))
+    else:
+        kept = int(np.count_nonzero(
+            label_hit(sitk.GetArrayViewFromImage(mask_crop), label_value)))
+    total = int(np.count_nonzero(
+        label_hit(sitk.GetArrayViewFromImage(mask), label_value)))
     if kept != total:
         raise RuntimeError(f"crop lost label voxels ({kept} of {total}); "
                            "this is a bug, not a margin problem")
@@ -167,6 +180,7 @@ def crop_pair(
         "crop_size_vox": list(map(int, extent)),
         "crop_start_vox": list(map(int, start)),
         "label_voxels": total,
+        "labels_present": available_labels(mask),
     }
 
 

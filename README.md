@@ -122,6 +122,21 @@ It reports the calibration diagnostics, warns when `z_std` has moved away from
 1 on the new set, and writes per-case predictions with 95% intervals. If the
 target column is missing it predicts anyway and skips the report.
 
+### Multi-label files
+
+Label files may hold several structures as different integer values.
+`--label-value N` selects one; it flows through cropping, training and
+evaluation, and is stored in the checkpoint so `eval.py` uses the same one.
+
+The selected label is binarized **before** any interpolation. Resampling a
+multi-label image and thresholding afterwards is the obvious implementation and
+it is wrong: halfway between label 2 and label 4 the interpolated value is 3, a
+different structure entirely, so any neighbouring label that touches the target
+gets pulled in — silently, because the result still looks like a plausible mask.
+
+`crop.py` keeps every label inside the box by default, so one crop can serve
+several targets; `--binarize-mask` writes the selected label alone as 0/1.
+
 ### Cropping
 
 `crop.py` reads the same CSV, writes a cropped `.nii.gz` pair per row, and
@@ -222,12 +237,13 @@ resampled mask is an input cue, not the source of truth for the label.
 pytest
 ```
 
-106 tests covering resampling geometry against known slice positions, flipped
+121 tests covering resampling geometry against known slice positions, flipped
 direction cosines, border clamping, falloff continuity, the gating intensity
 domain, exact affine rotation on non-square images, the standardizer round
 trip, the loss schedule, and an end-to-end run of all three CLIs against real
 `.nii.gz` files with mismatched voxel and matrix sizes, including the
-equivalence of the pipeline output before and after cropping. Tests requiring
+equivalence of the pipeline output before and after cropping and the isolation
+of one label from a touching neighbour. Tests requiring
 `torch`, `SimpleITK` or `pandas` skip cleanly if those are absent.
 
 ## Notes

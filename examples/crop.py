@@ -66,7 +66,11 @@ def parse_args(argv=None):
                    help="smallest augmentation zoom train.py will use")
     g.add_argument("--rotate-deg", type=float, default=5.0)
     g.add_argument("--translate", type=float, default=0.08)
-    g.add_argument("--label-value", type=int, default=1)
+    g.add_argument("--label-value", type=int, default=1,
+                   help="value of the target structure in a multi-label file")
+    g.add_argument("--binarize-mask", action="store_true",
+                   help="write only the selected label, as 0/1; the default "
+                        "keeps every label so one crop can serve several targets")
 
     g = p.add_argument_group("run")
     g.add_argument("--jobs", type=int, default=1, help="parallel worker processes")
@@ -81,13 +85,14 @@ def parse_args(argv=None):
 def _one(job):
     """Runs in a worker process; takes and returns only plain data."""
     (pos, image_path, mask_path, out_image, out_mask, label_value,
-     margin_mm, margin_mm_z, compress, skip_existing) = job
+     margin_mm, margin_mm_z, compress, skip_existing, binarize) = job
     try:
         if skip_existing and Path(out_image).exists() and Path(out_mask).exists():
             return pos, {"skipped_existing": True}, None
         stats = crop_pair(image_path, mask_path, out_image, out_mask,
                           label_value=label_value, margin_mm=margin_mm,
-                          margin_mm_z=margin_mm_z, compress=compress)
+                          margin_mm_z=margin_mm_z, compress=compress,
+                          binarize=binarize)
         return pos, stats, None
     except Exception as err:                           # noqa: BLE001
         return pos, None, f"{type(err).__name__}: {err}"
@@ -120,6 +125,9 @@ def main(argv=None):
             sys.exit(f"column {col!r} not in the CSV (columns: {list(df.columns)})")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"{args.csv}: {len(df)} rows -> {args.out_dir}")
+    print(f"target label value: {args.label_value}"
+          + (" (written as 0/1)" if args.binarize_mask
+             else " (all labels kept in the crop)"))
 
     def stem(pos, row):
         if args.id_col and args.id_col in df.columns:
@@ -133,7 +141,8 @@ def main(argv=None):
                      str(args.out_dir / f"{s}_img.nii.gz"),
                      str(args.out_dir / f"{s}_seg.nii.gz"),
                      args.label_value, margin, margin_z,
-                     not args.no_compress, args.skip_existing))
+                     not args.no_compress, args.skip_existing,
+                     args.binarize_mask))
 
     t0 = time.time()
     results = {}

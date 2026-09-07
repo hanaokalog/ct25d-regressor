@@ -12,8 +12,50 @@ import SimpleITK as sitk
 
 from .constants import AIR_HU, SLICE_GAP_MM, TARGET_INPLANE_MM
 
-__all__ = ["find_center_slice", "mask_area_mm2", "mask_centroid_index",
-           "build_sample_sitk", "build_samples_sitk"]
+__all__ = ["available_labels", "label_hit", "binarize_label", "find_center_slice",
+           "mask_area_mm2", "mask_centroid_index", "build_sample_sitk",
+           "build_samples_sitk"]
+
+
+def available_labels(mask: sitk.Image, limit: int = 20) -> list:
+    """The non-zero values present in a label image, for error messages."""
+    vals = np.unique(np.asarray(sitk.GetArrayViewFromImage(mask)))
+    vals = [v for v in vals.tolist() if v != 0]
+    return vals[:limit]
+
+
+def label_hit(arr: np.ndarray, label_value: int) -> np.ndarray:
+    """
+    Boolean mask of one label in a possibly multi-label array.
+
+    Compared with a half-unit tolerance rather than by equality, because label
+    files are sometimes stored as float and 3.0000001 == 3 is False.
+    """
+    return np.abs(np.asarray(arr, dtype=np.float64) - float(label_value)) < 0.5
+
+
+def binarize_label(mask: sitk.Image, label_value: int = 1) -> sitk.Image:
+    """
+    Extract one label as a 0/1 image, keeping the geometry.
+
+    This has to happen BEFORE any interpolation. Interpolating a multi-label
+    image mixes neighbouring structures -- halfway between label 2 and label 4
+    the interpolated value is 3, which is a different structure entirely -- so
+    resampling first and thresholding afterwards silently produces the wrong
+    region whenever labels touch.
+    """
+    binary = sitk.BinaryThreshold(
+        sitk.Cast(mask, sitk.sitkFloat32),
+        lowerThreshold=float(label_value) - 0.5,
+        upperThreshold=float(label_value) + 0.5,
+        insideValue=1, outsideValue=0)
+    return sitk.Cast(binary, sitk.sitkUInt8)
+
+
+def _require_label(mask: sitk.Image, label_value: int) -> None:
+    raise ValueError(
+        f"no voxel with label {label_value} in the mask; "
+        f"labels present: {available_labels(mask)}")
 
 
 def find_center_slice(mask: sitk.Image, label_value: int = 1) -> int:
@@ -25,11 +67,11 @@ def find_center_slice(mask: sitk.Image, label_value: int = 1) -> int:
     on exactly one slice.
     """
     arr = sitk.GetArrayViewFromImage(mask)          # (z, y, x)
-    hit = np.asarray(arr == label_value)
+    hit = label_hit(arr, label_value)
     per_slice = hit.reshape(hit.shape[0], -1).sum(axis=1)
     nz = np.flatnonzero(per_slice)
     if nz.size == 0:
-        raise ValueError(f"no voxel with label {label_value} in the mask")
+        _require_label(mask, label_value)
     if nz.size > 1:
         w = per_slice[nz].astype(np.float64)
         c = int(round(float((nz * w).sum() / w.sum())))
@@ -46,16 +88,16 @@ def mask_area_mm2(mask: sitk.Image, label_value: int = 1) -> float:
     """
     arr = sitk.GetArrayViewFromImage(mask)
     sx, sy = mask.GetSpacing()[0], mask.GetSpacing()[1]
-    return float(np.count_nonzero(arr == label_value) * sx * sy)
+    return float(np.count_nonzero(label_hit(arr, label_value)) * sx * sy)
 
 
 def mask_centroid_index(mask: sitk.Image, label_value: int = 1
                         ) -> tuple[float, float, float]:
     """Continuous index (x, y, z) of the label centroid, in the mask's grid."""
     arr = sitk.GetArrayViewFromImage(mask)
-    zz, yy, xx = np.nonzero(arr == label_value)
+    zz, yy, xx = np.nonzero(label_hit(arr, label_value))
     if xx.size == 0:
-        raise ValueError(f"no voxel with label {label_value} in the mask")
+        _require_label(mask, label_value)
     return float(xx.mean()), float(yy.mean()), float(zz.mean())
 
 
@@ -154,11 +196,14 @@ def build_sample_sitk(
 
     # ---- mask on the centre slice ------------------------------------------ #
     p_center = image.TransformContinuousIndexToPhysicalPoint((cx, cy, float(cz)))
-    m = _resample_plane(mask, p_center, (ow, oh), direction, in_plane_mm,
-                        sitk.sitkLinear, 0.0)
-    # bilinear + threshold rather than nearest: nearest quantizes the boundary
-    # and makes the effective area jump by whole pixels.
-    m = (m >= mask_threshold * label_value).astype(np.float32)
+    # Binarize first: interpolating a multi-label image would blend the target
+    # with whatever labels touch it. After binarization the plane is resampled
+    # bilinearly and thresholded, rather than sampled with nearest neighbour,
+    # because nearest quantizes the boundary and makes the effective area jump
+    # by whole pixels.
+    m = _resample_plane(binarize_label(mask, label_value), p_center, (ow, oh),
+                        direction, in_plane_mm, sitk.sitkLinear, 0.0)
+    m = (m >= mask_threshold).astype(np.float32)
 
     return np.concatenate([np.stack(planes), m[None]], axis=0).astype(np.float32)
 
