@@ -89,6 +89,7 @@ def prepare_stacks(
     mask_col: str = "mask",
     crop_size: int = 96,
     verbose: bool = True,
+    workers: int = 1,
     **build_kwargs,
 ):
     """
@@ -102,11 +103,10 @@ def prepare_stacks(
     aborting the run, because one bad segmentation should not cost a whole
     training job -- but every skip is reported, since a silent skip is how a
     cohort quietly shrinks.
+
+    `workers` > 1 reads and resamples the rows in that many processes; reading
+    dominates on network storage. The result is the same as with one.
     """
-    import SimpleITK as sitk
-
-    from .geometry import build_sample_sitk
-
     if crop_size is None:
         raise ValueError(
             "crop_size is required: volumes with different voxel sizes produce "
@@ -116,18 +116,33 @@ def prepare_stacks(
             raise KeyError(f"column {col!r} not in the CSV "
                            f"(columns: {list(df.columns)})")
 
+    jobs = [(str(row[image_col]), str(row[mask_col]), crop_size, build_kwargs)
+            for _, row in df.iterrows()]
+    if workers > 1:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        # spawn, not fork: the caller usually has torch threads running
+        pool = ProcessPoolExecutor(workers,
+                                   mp_context=multiprocessing.get_context("spawn"))
+        results = pool.map(_prepare_one, jobs, chunksize=4)
+    else:
+        pool = None
+        results = map(_prepare_one, jobs)
+
     stacks, kept, failures = [], [], []
-    for pos, (idx, row) in enumerate(df.iterrows()):
-        try:
-            img = sitk.ReadImage(str(row[image_col]))
-            lab = sitk.ReadImage(str(row[mask_col]))
-            stacks.append(build_sample_sitk(img, lab, crop_size=crop_size,
-                                            **build_kwargs))
-            kept.append(pos)
-        except Exception as err:                       # noqa: BLE001
-            failures.append((idx, f"{type(err).__name__}: {err}"))
-        if verbose and (pos + 1) % 25 == 0:
-            print(f"  prepared {pos + 1}/{len(df)}", flush=True)
+    try:
+        for pos, (idx, (stack, err)) in enumerate(zip(df.index, results)):
+            if err is None:
+                stacks.append(stack)
+                kept.append(pos)
+            else:
+                failures.append((idx, err))
+            if verbose and (pos + 1) % 25 == 0:
+                print(f"  prepared {pos + 1}/{len(df)}", flush=True)
+    finally:
+        if pool is not None:
+            pool.shutdown()
 
     if not stacks:
         raise RuntimeError("no usable rows; first failures: " + str(failures[:3]))
@@ -138,6 +153,21 @@ def prepare_stacks(
         if len(failures) > 10:
             print(f"    ... and {len(failures) - 10} more")
     return np.stack(stacks), np.asarray(kept), failures
+
+
+def _prepare_one(job):
+    """(stack, None) or (None, reason) for one row; top level so it pickles."""
+    import SimpleITK as sitk
+
+    from .geometry import build_sample_sitk
+
+    image_path, mask_path, crop_size, build_kwargs = job
+    try:
+        img = sitk.ReadImage(image_path)
+        lab = sitk.ReadImage(mask_path)
+        return build_sample_sitk(img, lab, crop_size=crop_size, **build_kwargs), None
+    except Exception as err:                           # noqa: BLE001
+        return None, f"{type(err).__name__}: {err}"
 
 
 def split_indices(

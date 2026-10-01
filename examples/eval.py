@@ -54,6 +54,8 @@ def parse_args(argv=None):
                    help="write per-case predictions here (default: <csv>.pred.csv)")
     p.add_argument("--image-col", default=None, help="override the trained column")
     p.add_argument("--mask-col", default=None, help="override the trained column")
+    p.add_argument("--prep-workers", type=int, default=1,
+                   help="processes that read and resample the volumes")
     p.add_argument("--cache", type=Path, default=None)
     p.add_argument("--encoding", default=None)
     p.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW")
@@ -141,7 +143,7 @@ def main(argv=None):
             raise SystemExit(f"[error] {err}") from None
         print(f"loaded cached stacks from {args.cache}")
     else:
-        stacks, kept, _ = prepare_stacks(df, **prep)
+        stacks, kept, _ = prepare_stacks(df, workers=args.prep_workers, **prep)
         if args.cache is not None:
             args.cache.parent.mkdir(parents=True, exist_ok=True)
             save_stack_cache(args.cache, stacks, kept, prep)

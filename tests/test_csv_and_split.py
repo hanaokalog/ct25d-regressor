@@ -52,3 +52,27 @@ def test_split_three_from_a_column():
     df = pd.DataFrame({"s": ["train", "val", "test", "Train ", "excluded"]})
     tr, va, te = split_three(df, split_col="s")
     assert tr.tolist() == [0, 3] and va.tolist() == [1] and te.tolist() == [2]
+
+
+def test_prepare_stacks_in_parallel_matches_serial(tmp_path):
+    import pandas as pd
+    import SimpleITK as sitk
+    from conftest import make_case
+
+    from ct25d.tabular import prepare_stacks
+
+    rows = []
+    for i in range(5):
+        img, lab, _ = make_case(center_index=8 + i)
+        if i == 2:
+            lab = lab * 0                                   # empty label: skipped
+        ip, mp = tmp_path / f"{i}_img.nii.gz", tmp_path / f"{i}_seg.nii.gz"
+        sitk.WriteImage(img, str(ip))
+        sitk.WriteImage(lab, str(mp))
+        rows.append(dict(image=str(ip), mask=str(mp)))
+    df = pd.DataFrame(rows)
+    one = prepare_stacks(df, crop_size=32, verbose=False)
+    two = prepare_stacks(df, crop_size=32, verbose=False, workers=3)
+    assert np.array_equal(one[0], two[0])
+    assert one[1].tolist() == two[1].tolist() == [0, 1, 3, 4]
+    assert [i for i, _ in one[2]] == [i for i, _ in two[2]] == [2]

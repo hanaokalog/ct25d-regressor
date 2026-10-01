@@ -100,6 +100,8 @@ def parse_args(argv=None):
                    help="value of the target structure in a multi-label file")
     g.add_argument("--window", type=float, nargs=2, default=list(CT_WINDOW),
                    metavar=("LO", "HI"))
+    g.add_argument("--prep-workers", type=int, default=1,
+                   help="processes that read and resample the volumes")
     g.add_argument("--cache", type=Path, default=None,
                    help="npz file to read/write the prepared stacks")
 
@@ -177,7 +179,7 @@ def load_or_prepare(df, args):
 
     print(f"preparing {len(df)} cases ...")
     t0 = time.time()
-    stacks, kept, _ = prepare_stacks(df, **prep)
+    stacks, kept, _ = prepare_stacks(df, workers=args.prep_workers, **prep)
     print(f"  {len(kept)}/{len(df)} usable, {time.time() - t0:.0f}s, "
           f"stack {stacks.shape[1:]}")
     if args.cache is not None:
