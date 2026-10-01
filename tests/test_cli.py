@@ -106,6 +106,31 @@ def test_train_then_eval(cohort, tmp_path):
     assert np.isfinite(out["pred"]).all()
     assert "unrelated" in out.columns          # the original columns survive
 
+    # the in-pipeline Predictor gives what eval.py wrote
+    from ct25d.inference import Predictor
+    p = Predictor(model)
+    row = out.iloc[3]
+    r = p.predict(sitk.ReadImage(row["ct"]), sitk.ReadImage(row["seg"]))
+    assert r["mean"] == pytest.approx(row["pred"], rel=1e-4)
+    assert r["sigma"] == pytest.approx(row["pred_sigma"], rel=1e-4)
+    assert r["lo95"] == pytest.approx(row["pred_lo95"], rel=1e-4)
+
+    # rows without a target are dropped by default, predicted with --keep-unlabelled
+    df = pd.read_csv(cohort)
+    df.loc[[0, 5], "area_mm2"] = np.nan
+    gaps = tmp_path / "gaps.csv"
+    df.to_csv(gaps, index=False)
+    pred = tmp_path / "gaps_pred.csv"
+    run("eval.py", [str(gaps), "area_mm2", str(model), "--out", str(pred),
+                    "--device", "cpu"])
+    assert len(pd.read_csv(pred)) == 10
+    log = run("eval.py", [str(gaps), "area_mm2", str(model), "--out", str(pred),
+                          "--device", "cpu", "--keep-unlabelled"])
+    out = pd.read_csv(pred)
+    assert len(out) == 12 and np.isfinite(out["pred"]).all()
+    assert out["residual"].isna().tolist() == [i in (0, 5) for i in range(12)]
+    assert "n              10" in log
+
 
 def test_epoch_log_reports_the_error_in_physical_units(cohort, tmp_path):
     """A standardized MAE cannot be compared with clinical expectations."""
@@ -186,3 +211,9 @@ def test_classification_with_a_test_split_and_cp932_csv(cohort, tmp_path):
     out = pd.read_csv(pred)
     assert {"pred", "pred_conf", "prob_0", "prob_1"} <= set(out.columns)
     assert np.allclose(out[["prob_0", "prob_1"]].sum(1), 1.0)
+
+    from ct25d.inference import Predictor
+    row = out.iloc[2]
+    r = Predictor(model).predict(sitk.ReadImage(row["ct"]), sitk.ReadImage(row["seg"]))
+    assert r["pred"] == row["pred"]
+    assert np.allclose(r["probs"], row[["prob_0", "prob_1"]].to_numpy(float), atol=1e-5)

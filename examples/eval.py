@@ -62,6 +62,9 @@ def parse_args(argv=None):
     p.add_argument("--split-col", default=None,
                    help="evaluate only the rows whose value here is --split")
     p.add_argument("--split", default="test")
+    p.add_argument("--keep-unlabelled", action="store_true",
+                   help="also predict the rows whose target is empty (e.g. to "
+                        "impute them); the report covers the labelled rows only")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -122,7 +125,8 @@ def main(argv=None):
     has_truth = args.target in df.columns
     if has_truth:
         df[args.target] = pd.to_numeric(df[args.target], errors="coerce")
-        df = df[df[args.target].notna()].reset_index(drop=True)
+        if not args.keep_unlabelled:
+            df = df[df[args.target].notna()].reset_index(drop=True)
     else:
         print(f"[info] {args.target!r} not in the CSV; predicting only")
     print(f"{args.csv}: {len(df)} rows")
@@ -157,6 +161,10 @@ def main(argv=None):
     # Targets only feed the report; the dataset needs an array either way.
     y = (df[args.target].to_numpy(dtype=np.float64) if has_truth
          else np.zeros(len(df)))
+    # rows without a target (only with --keep-unlabelled) are predicted, not scored
+    labelled = np.isfinite(y)
+    has_truth = has_truth and bool(labelled.any())
+    y = np.where(labelled, y, 0.0)
     ds = SliceStackDataset(stacks, y, standardizer=std, augment=None, gate=gate,
                            target_scale_power=0, window=tuple(cfg["window"]),
                            mask_channel=cfg["mask_channel"],
@@ -167,7 +175,8 @@ def main(argv=None):
     path = args.out or args.csv.with_suffix(".pred.csv")
 
     if classify:
-        evaluate_classifier(model, loader, df, y, has_truth, cfg, path, args)
+        evaluate_classifier(model, loader, df, y, labelled, has_truth, cfg, path,
+                            args)
         return
 
     mu_z, sigma_z = predict(model, loader, args.device)
@@ -176,7 +185,8 @@ def main(argv=None):
     if args.refit_calibration:
         if not has_truth:
             raise SystemExit("--refit-calibration needs the target column")
-        scale = fit_sigma_scale(mu_z, sigma_z, std.transform(y))
+        scale = fit_sigma_scale(mu_z[labelled], sigma_z[labelled],
+                                std.transform(y[labelled]))
         print(f"refit sigma scale on this set: {scale:.3f}")
     sigma_zc = sigma_z * scale
     mean, sigma = std.inverse_transform(mu_z, sigma_zc)
@@ -193,8 +203,8 @@ def main(argv=None):
     out["pred_hi95"] = hi95
     if has_truth:
         y_z = std.transform(y)
-        out["residual"] = y - mean
-        out["z_score"] = (y_z - mu_z) / sigma_zc
+        out["residual"] = np.where(labelled, y - mean, np.nan)
+        out["z_score"] = np.where(labelled, (y_z - mu_z) / sigma_zc, np.nan)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
@@ -205,10 +215,11 @@ def main(argv=None):
               f"median sigma {np.median(sigma):.4g}")
         return
 
-    rep = uncertainty_report(mean, sigma, y)
+    m = labelled
+    rep = uncertainty_report(mean[m], sigma[m], y[m])
     # calibration figures from the standardized space, so they describe the
     # intervals written above rather than a linearized approximation of them
-    rep_z = uncertainty_report(mu_z, sigma_zc, y_z)
+    rep_z = uncertainty_report(mu_z[m], sigma_zc[m], y_z[m])
     for k in ("z_std", "coverage_95"):
         rep[k] = rep_z[k]
     print(f"\nevaluation, in the units of {args.target} "
@@ -227,13 +238,14 @@ def main(argv=None):
               "close to a constant and adds little per case.")
 
 
-def evaluate_classifier(model, loader, df, y, has_truth, cfg, path, args):
+def evaluate_classifier(model, loader, df, y, labelled, has_truth, cfg, path,
+                        args):
     logits = predict_logits(model, loader, args.device)
     t = 1.0 if args.no_calibration else cfg["temperature"]
     if args.refit_calibration:
         if not has_truth:
             raise SystemExit("--refit-calibration needs the target column")
-        t = fit_temperature(logits, y.astype(int))
+        t = fit_temperature(logits[labelled], y[labelled].astype(int))
         print(f"refit temperature on this set: {t:.3f}")
     z = logits / t
     z = z - z.max(axis=1, keepdims=True)
@@ -250,7 +262,7 @@ def evaluate_classifier(model, loader, df, y, has_truth, cfg, path, args):
     if not has_truth:
         print(f"predicted classes: {np.bincount(prob.argmax(1)).tolist()}")
         return
-    rep = classification_report(prob, y.astype(int))
+    rep = classification_report(prob[labelled], y[labelled].astype(int))
     print(f"\nevaluation of {args.target}:")
     for k, v in rep.items():
         if k != "confusion":
