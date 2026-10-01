@@ -281,6 +281,14 @@ one that tells you the uncertainty is informative per case rather than merely
 correct on average. `fit_sigma_scale` gives the single multiplicative
 correction, fit on the validation split.
 
+The 95% intervals `eval.py` writes are built in the standardized space and
+mapped back (`TargetStandardizer.interval`). With `--log-target` they are
+therefore asymmetric in the target's units, with the longer tail upwards,
+rather than a symmetric mean ± 1.96σ from the delta method, which has the
+wrong coverage and can reach far below zero. `z_score`, `z_std` and
+`coverage_95` are computed in the same space, so they describe those
+intervals.
+
 ## Targets and augmentation
 
 Zoom augmentation changes the apparent size of the structure, so a
@@ -300,7 +308,8 @@ resampled mask is an input cue, not the source of truth for the label.
 pytest
 ```
 
-134 tests covering resampling geometry, slab averaging across slice thicknesses against known slice positions, flipped
+136 tests covering resampling geometry against known slice positions, slab
+averaging across slice thicknesses, log-space intervals, flipped
 direction cosines, border clamping, falloff continuity, the gating intensity
 domain, exact affine rotation on non-square images, the standardizer round
 trip, the loss schedule, and an end-to-end run of all three CLIs against real

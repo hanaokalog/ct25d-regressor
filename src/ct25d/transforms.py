@@ -200,6 +200,23 @@ class TargetStandardizer:
             y = y_lin
         return (y, s) if s is not None else y
 
+    def interval(self, mu, sigma, z: float = 1.96):
+        """
+        (lo, hi) of the central interval mu +- z * sigma, built in the
+        standardized space the Gaussian lives in and mapped back.
+
+        With log_transform the predictive distribution of 1 + y is log-normal,
+        so a symmetric mean +- 1.96 * sigma in the target's units (with the
+        delta-method sigma) has the wrong coverage and its lower end can fall
+        far below zero. The transform is monotonic, so mapping the two bounds
+        keeps the probability exactly, and the lower bound stays above -1 (the
+        log1p offset). Without log_transform this is the usual symmetric
+        interval.
+        """
+        lo = self.inverse_transform(mu - z * sigma)
+        hi = self.inverse_transform(mu + z * sigma)
+        return lo, hi
+
     def state_dict(self):
         return {"mean": self.mean_, "std": self.std_, "log": self.log_transform}
 

@@ -191,3 +191,29 @@ def test_unfitted_standardizer_raises():
 def test_log_transform_rejects_negative_targets():
     with pytest.raises(ValueError):
         TargetStandardizer(log_transform=True).fit([-1.0, 2.0])
+
+
+def test_log_target_interval_is_asymmetric_bounded_and_exact():
+    rng = np.random.default_rng(0)
+    std = TargetStandardizer(log_transform=True).fit(rng.lognormal(3, 1, 500))
+    mu = np.array([-2.5, 0.0, 1.0])
+    sigma = np.array([0.8, 0.5, 0.3])
+    lo, hi = std.interval(mu, sigma)
+    mean = std.inverse_transform(mu)
+    assert (lo > -1).all() and (lo < mean).all() and (mean < hi).all()
+    assert ((hi - mean) > (mean - lo)).all()         # log-normal: longer upper tail
+    # the bounds are exactly the transformed standardized bounds
+    np.testing.assert_allclose(std.transform(lo), mu - 1.96 * sigma, rtol=1e-5)
+    np.testing.assert_allclose(std.transform(hi), mu + 1.96 * sigma, rtol=1e-5)
+    # the delta-method interval this replaces falls far below -1 for the first
+    _, s = std.inverse_transform(mu, sigma)
+    assert (mean - 1.96 * s)[0] < -1
+
+
+def test_linear_target_interval_is_the_usual_one():
+    std = TargetStandardizer().fit(np.array([10.0, 20.0, 30.0, 50.0]))
+    mu, sigma = np.array([0.3, -1.0]), np.array([0.5, 0.2])
+    lo, hi = std.interval(mu, sigma)
+    mean, s = std.inverse_transform(mu, sigma)
+    np.testing.assert_allclose(lo, mean - 1.96 * s)
+    np.testing.assert_allclose(hi, mean + 1.96 * s)

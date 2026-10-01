@@ -352,8 +352,14 @@ def main(argv=None):
     scale = fit_sigma_scale(mu_z, sigma_z, z_true)
     mean, sigma = std.inverse_transform(mu_z, sigma_z * scale)
     final = uncertainty_report(mean, sigma, targets[va])
+    # calibration figures in the standardized space, where the intervals that
+    # eval.py writes are built (see TargetStandardizer.interval)
+    final_z = uncertainty_report(mu_z, sigma_z * scale, z_true)
+    for k in ("z_std", "coverage_95"):
+        final[k] = final_z[k]
     print(f"\nbest epoch {best['epoch']}, sigma scale {scale:.3f}")
-    print("validation, in the units of " + args.target + ":")
+    print("validation, in the units of " + args.target
+          + " (z_std and coverage_95 in the standardized space):")
     for k, v in final.items():
         print(f"  {k:14s} {v:.4f}")
 

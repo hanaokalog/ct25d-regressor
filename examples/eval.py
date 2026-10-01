@@ -136,16 +136,23 @@ def main(argv=None):
             raise SystemExit("--refit-calibration needs the target column")
         scale = fit_sigma_scale(mu_z, sigma_z, std.transform(y))
         print(f"refit sigma scale on this set: {scale:.3f}")
-    mean, sigma = std.inverse_transform(mu_z, sigma_z * scale)
+    sigma_zc = sigma_z * scale
+    mean, sigma = std.inverse_transform(mu_z, sigma_zc)
+    # The interval and the z-score are taken where the predictive Gaussian
+    # lives, the standardized space. With --log-target that makes the interval
+    # asymmetric in the target's units and keeps it above -1; without it they
+    # equal the usual mean +- 1.96 sigma and (y - mean) / sigma.
+    lo95, hi95 = std.interval(mu_z, sigma_zc, 1.96)
 
     out = df.copy()
     out["pred"] = mean
     out["pred_sigma"] = sigma
-    out["pred_lo95"] = mean - 1.96 * sigma
-    out["pred_hi95"] = mean + 1.96 * sigma
+    out["pred_lo95"] = lo95
+    out["pred_hi95"] = hi95
     if has_truth:
+        y_z = std.transform(y)
         out["residual"] = y - mean
-        out["z_score"] = (y - mean) / sigma
+        out["z_score"] = (y_z - mu_z) / sigma_zc
 
     path = args.out or args.csv.with_suffix(".pred.csv")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,7 +165,14 @@ def main(argv=None):
         return
 
     rep = uncertainty_report(mean, sigma, y)
-    print(f"\nevaluation, in the units of {args.target}:")
+    # calibration figures from the standardized space, so they describe the
+    # intervals written above rather than a linearized approximation of them
+    rep_z = uncertainty_report(mu_z, sigma_zc, y_z)
+    for k in ("z_std", "coverage_95"):
+        rep[k] = rep_z[k]
+    print(f"\nevaluation, in the units of {args.target} "
+          f"(z_std and coverage_95 in the {'log-' if std.log_transform else ''}"
+          f"standardized space):")
     for k, v in rep.items():
         print(f"  {k:14s} {v:.4f}")
     if abs(rep["z_std"] - 1.0) > 0.2:
