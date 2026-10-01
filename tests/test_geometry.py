@@ -13,6 +13,7 @@ from ct25d.geometry import (
     build_samples_sitk,
     find_center_slice,
     mask_area_mm2,
+    slab_offsets_mm,
 )
 
 
@@ -103,3 +104,62 @@ def test_empty_mask_is_rejected():
     empty.CopyInformation(lab)
     with pytest.raises(ValueError, match="no voxel with label"):
         build_sample_sitk(img, empty)
+
+
+# ---- slab averaging ------------------------------------------------------- #
+
+def test_slab_sample_count_follows_the_native_spacing():
+    assert slab_offsets_mm(5.0, 1.0).tolist() == [-2.0, -1.0, 0.0, 1.0, 2.0]
+    assert slab_offsets_mm(5.0, 2.5).tolist() == [-1.25, 1.25]
+    assert slab_offsets_mm(5.0, 5.0).tolist() == [0.0]
+    assert slab_offsets_mm(5.0, 7.0).tolist() == [0.0]
+    assert slab_offsets_mm(0.0, 1.0).tolist() == [0.0]
+    assert slab_offsets_mm(None, 1.0).tolist() == [0.0]
+
+
+def test_slab_leaves_5mm_volumes_unchanged():
+    img, lab, _ = make_case(z_spacing=5.0, size=(120, 120, 12))
+    a = build_sample_sitk(img, lab, crop_size=64, slab_mm=5.0)
+    b = build_sample_sitk(img, lab, crop_size=64, slab_mm=0.0)
+    assert np.array_equal(a, b)
+
+
+def _acquire(thickness_mm, n_slices, period_mm=8.0, amp=500.0, size=64):
+    """
+    The same anatomy scanned at a given slice thickness: every slice holds the
+    mean of f(z) = amp * sin(2 pi z / period) over its own thickness, which is
+    what a scanner's slice profile does. Slices are contiguous from z = 0.
+    """
+    vol = np.empty((n_slices, size, size), np.float32)
+    for k in range(n_slices):
+        u = (np.arange(400) + 0.5) / 400 - 0.5          # midpoint rule
+        zz = k * thickness_mm + u * thickness_mm
+        vol[k] = amp * np.sin(2 * np.pi * zz / period_mm).mean()
+    img = sitk.GetImageFromArray(vol)
+    img.SetSpacing((0.8, 0.8, thickness_mm))
+    yy, xx = np.mgrid[0:size, 0:size]
+    msk = np.zeros(vol.shape, np.uint8)
+    msk[int(round(30.0 / thickness_mm))] = (yy - 32) ** 2 + (xx - 32) ** 2 <= 100
+    lab = sitk.GetImageFromArray(msk)
+    lab.CopyInformation(img)
+    return img, lab
+
+
+def test_thin_slices_averaged_over_5mm_match_a_5mm_scan():
+    thick = build_sample_sitk(*_acquire(5.0, 12), crop_size=32)
+    thin = build_sample_sitk(*_acquire(1.0, 60), crop_size=32)
+    raw = build_sample_sitk(*_acquire(1.0, 60), crop_size=32, slab_mm=0.0)
+
+    err_slab = np.abs(thin[:3] - thick[:3]).max()
+    err_raw = np.abs(raw[:3] - thick[:3]).max()
+    assert err_slab < 1.0                        # HU, against an amplitude of 500
+    assert err_raw > 100.0                       # what the 4 mm in between carry
+    assert np.array_equal(thin[3], thick[3])     # the mask is not averaged
+
+
+def test_slab_at_the_volume_border_clamps_instead_of_reading_air():
+    img, lab, _ = make_case(z_spacing=1.0, size=(120, 120, 30), center_index=0)
+    s = build_sample_sitk(img, lab, crop_size=64)
+    # centre plane: samples at -2..2 mm, the negative ones clamp to slice 0
+    assert round(float(np.median(s[1]))) == round((0 + 0 + 0 + 100 + 200) / 5)
+    assert float(s[:3].min()) >= 0.0

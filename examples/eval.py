@@ -29,7 +29,7 @@ from ct25d.calibration import fit_sigma_scale, uncertainty_report
 from ct25d.checkpoint import load_checkpoint
 from ct25d.data import SliceStackDataset
 from ct25d.gating import DistanceGate
-from ct25d.tabular import prepare_stacks
+from ct25d.tabular import load_stack_cache, prepare_stacks, save_stack_cache
 
 
 def parse_args(argv=None):
@@ -94,19 +94,23 @@ def main(argv=None):
 
     image_col = args.image_col or cfg["image_col"]
     mask_col = args.mask_col or cfg["mask_col"]
+    prep = dict(image_col=image_col, mask_col=mask_col,
+                crop_size=cfg["crop_size"], n_slices=cfg["n_slices"],
+                gap_mm=cfg["gap_mm"], in_plane_mm=cfg["in_plane_mm"],
+                # checkpoints from before slab averaging took a single plane
+                slab_mm=cfg.get("slab_mm", 0.0),
+                label_value=cfg["label_value"])
     if args.cache is not None and args.cache.exists():
-        z = np.load(args.cache)
-        stacks, kept = z["stacks"], z["kept"]
+        try:
+            stacks, kept = load_stack_cache(args.cache, prep)
+        except ValueError as err:
+            raise SystemExit(f"[error] {err}") from None
         print(f"loaded cached stacks from {args.cache}")
     else:
-        stacks, kept, _ = prepare_stacks(
-            df, image_col=image_col, mask_col=mask_col,
-            crop_size=cfg["crop_size"], n_slices=cfg["n_slices"],
-            gap_mm=cfg["gap_mm"], in_plane_mm=cfg["in_plane_mm"],
-            label_value=cfg["label_value"])
+        stacks, kept, _ = prepare_stacks(df, **prep)
         if args.cache is not None:
             args.cache.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(args.cache, stacks=stacks, kept=kept)
+            save_stack_cache(args.cache, stacks, kept, prep)
     df = df.iloc[kept].reset_index(drop=True)
 
     gate = None if cfg["gate"] is None else DistanceGate(

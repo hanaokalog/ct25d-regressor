@@ -31,12 +31,17 @@ from torch.utils.data import DataLoader
 
 from ct25d.calibration import fit_sigma_scale, uncertainty_report
 from ct25d.checkpoint import build_model, save_checkpoint
-from ct25d.constants import CT_WINDOW, SLICE_GAP_MM, TARGET_INPLANE_MM
+from ct25d.constants import CT_WINDOW, SLAB_MM, SLICE_GAP_MM, TARGET_INPLANE_MM
 from ct25d.data import SliceStackDataset
 from ct25d.gating import DistanceGate
 from ct25d.geometry import required_patch_size
 from ct25d.losses import WarmupHeteroscedasticLoss
-from ct25d.tabular import prepare_stacks, split_indices
+from ct25d.tabular import (
+    load_stack_cache,
+    prepare_stacks,
+    save_stack_cache,
+    split_indices,
+)
 from ct25d.transforms import RandomAffine2D, TargetStandardizer
 
 
@@ -64,6 +69,9 @@ def parse_args(argv=None):
                    help="train anyway when structures do not fit in the patch")
     g.add_argument("--n-slices", type=int, default=3)
     g.add_argument("--gap-mm", type=float, default=SLICE_GAP_MM)
+    g.add_argument("--slab-mm", type=float, default=SLAB_MM,
+                   help="average each plane over this thickness, so thin-slice "
+                        "volumes match 5 mm ones; 0 takes a single plane")
     g.add_argument("--in-plane-mm", type=float, default=TARGET_INPLANE_MM)
     g.add_argument("--label-value", type=int, default=1,
                    help="value of the target structure in a multi-label file")
@@ -123,22 +131,26 @@ def parse_args(argv=None):
 
 def load_or_prepare(df, args):
     """Resampling dominates the wall clock, so cache it."""
+    prep = dict(image_col=args.image_col, mask_col=args.mask_col,
+                crop_size=args.crop_size, n_slices=args.n_slices,
+                gap_mm=args.gap_mm, slab_mm=args.slab_mm,
+                in_plane_mm=args.in_plane_mm, label_value=args.label_value)
     if args.cache is not None and args.cache.exists():
-        z = np.load(args.cache)
+        try:
+            stacks, kept = load_stack_cache(args.cache, prep)
+        except ValueError as err:
+            sys.exit(f"[error] {err}")
         print(f"loaded cached stacks from {args.cache}")
-        return z["stacks"], z["kept"]
+        return stacks, kept
 
     print(f"preparing {len(df)} cases ...")
     t0 = time.time()
-    stacks, kept, _ = prepare_stacks(
-        df, image_col=args.image_col, mask_col=args.mask_col,
-        crop_size=args.crop_size, n_slices=args.n_slices, gap_mm=args.gap_mm,
-        in_plane_mm=args.in_plane_mm, label_value=args.label_value)
+    stacks, kept, _ = prepare_stacks(df, **prep)
     print(f"  {len(kept)}/{len(df)} usable, {time.time() - t0:.0f}s, "
           f"stack {stacks.shape[1:]}")
     if args.cache is not None:
         args.cache.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(args.cache, stacks=stacks, kept=kept)
+        save_stack_cache(args.cache, stacks, kept, prep)
         print(f"  cached to {args.cache}")
     return stacks, kept
 
@@ -270,8 +282,9 @@ def main(argv=None):
         arch=arch, target=args.target,
         image_col=args.image_col, mask_col=args.mask_col,
         crop_size=args.crop_size, n_slices=args.n_slices, gap_mm=args.gap_mm,
-        in_plane_mm=args.in_plane_mm, label_value=args.label_value,
-        window=list(args.window), mask_channel=args.mask_channel,
+        slab_mm=args.slab_mm, in_plane_mm=args.in_plane_mm,
+        label_value=args.label_value, window=list(args.window),
+        mask_channel=args.mask_channel,
         keep_context=bool(args.keep_context),
         gate=(None if gate is None else dict(
             radius_mm=args.gate_radius_mm, pixel_mm=args.in_plane_mm,

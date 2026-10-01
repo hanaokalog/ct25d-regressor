@@ -4,7 +4,7 @@
 
 Given a CT volume and a binary mask of a structure on one slice, the model
 predicts a scalar quantity about that structure together with a per-case
-uncertainty. Three slices 5 mm apart are stacked as channels, the image is
+uncertainty. Three 5 mm slabs 5 mm apart are stacked as channels, the image is
 gated to a 1 cm neighbourhood of the structure, and a ResNet with CBAM
 attention outputs a Gaussian mean and variance.
 
@@ -112,7 +112,9 @@ column, checkpoint — with the model written by one and read by the other.
 `--group-col` splits over groups rather than rows, so two studies from the same
 patient cannot land on opposite sides of the split. `--cache` stores the
 resampled stacks in an npz, which is worth setting: resampling dominates the
-wall clock and is identical every epoch.
+wall clock and is identical every epoch. The cache records the preprocessing
+settings that wrote it, and a cache written with different ones (or by a
+version before slab averaging) is refused rather than reused.
 
 The checkpoint carries the weights, the full preprocessing configuration, the
 fitted `TargetStandardizer` and the calibrated sigma scale. `eval.py` takes all
@@ -217,6 +219,19 @@ In-plane pixels are resampled to **0.78125 mm** and the three slices are taken
 through SimpleITK in physical coordinates, so oblique direction cosines,
 differing origins, and a mask stored on its own grid all work.
 
+**Each plane is a 5 mm slab mean, whatever the native slice thickness.**
+Sampling one plane every 5 mm from a 1 mm scan would use a fifth of the data
+and give planes that are sharper and noisier than the same anatomy scanned at
+5 mm, so a model trained on one would not transfer to the other. Instead each
+plane averages `round(5 / spacing)` native-spaced samples around it — 5 at
+1 mm, 2 at 2.5 mm — which is how a scanner builds a thick slice from thin
+ones. At 5 mm or coarser it is the native slice itself, unchanged. On a
+phantom scanned at both 1 mm and 5 mm the planes then agree to under 0.01 HU,
+against 250 HU without averaging. Set it with `--slab-mm` (`0` takes a single
+plane). The spacing stands in for the slice thickness, which NIfTI does not
+record, so overlapping reconstructions are smoothed slightly more than
+necessary. The mask channel is not averaged.
+
 Each plane is resampled independently rather than as one 3D grid. That allows
 the z position to be clamped inside the volume, so a structure on the first or
 last slice gets a duplicated neighbour instead of a plane of air.
@@ -285,7 +300,7 @@ resampled mask is an input cue, not the source of truth for the label.
 pytest
 ```
 
-127 tests covering resampling geometry against known slice positions, flipped
+134 tests covering resampling geometry, slab averaging across slice thicknesses against known slice positions, flipped
 direction cosines, border clamping, falloff continuity, the gating intensity
 domain, exact affine rotation on non-square images, the standardizer round
 trip, the loss schedule, and an end-to-end run of all three CLIs against real

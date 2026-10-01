@@ -11,11 +11,12 @@ from typing import Optional
 import numpy as np
 import SimpleITK as sitk
 
-from .constants import AIR_HU, SLICE_GAP_MM, TARGET_INPLANE_MM
+from .constants import AIR_HU, SLAB_MM, SLICE_GAP_MM, TARGET_INPLANE_MM
 
 __all__ = ["available_labels", "label_hit", "binarize_label", "find_center_slice",
            "mask_area_mm2", "mask_centroid_index", "mask_extent_mm",
-           "required_patch_size", "build_sample_sitk", "build_samples_sitk"]
+           "required_patch_size", "slab_offsets_mm", "build_sample_sitk",
+           "build_samples_sitk"]
 
 
 def available_labels(mask: sitk.Image, limit: int = 20) -> list:
@@ -182,6 +183,32 @@ def required_patch_size(
     return int(math.ceil(px / multiple) * multiple)
 
 
+def slab_offsets_mm(slab_mm: Optional[float], z_spacing_mm: float) -> np.ndarray:
+    """
+    Through-plane sample positions, relative to a plane, whose mean stands in
+    for a slab `slab_mm` thick.
+
+    Each native slice is taken to represent its own spacing of tissue, so a
+    slab is covered by round(slab_mm / spacing) samples one native spacing
+    apart: 5 at 1 mm, 2 at 2.5 mm, 8 at 0.625 mm. That is the same averaging a
+    scanner does when it reconstructs a thick slice from thin ones. At 5 mm or
+    coarser it is a single sample at offset 0 -- the native slice already is
+    the slab, and averaging it again would blur 5 mm data beyond what the same
+    patient would give at 1 mm.
+
+    The slice thickness proper is not used, because NIfTI and MetaImage do not
+    record it. For overlapping reconstructions (thickness larger than the
+    spacing) this overestimates the sample count and smooths slightly more.
+
+    `slab_mm` of None or 0 disables averaging: one sample at offset 0.
+    """
+    if not slab_mm or slab_mm <= 0:
+        return np.zeros(1)
+    sz = float(z_spacing_mm)
+    n = max(1, int(round(float(slab_mm) / sz)))
+    return (np.arange(n) - (n - 1) / 2.0) * sz
+
+
 def build_sample_sitk(
     image: sitk.Image,
     mask: sitk.Image,
@@ -189,6 +216,7 @@ def build_sample_sitk(
     center_index: Optional[int] = None,
     n_slices: int = 3,
     gap_mm: float = SLICE_GAP_MM,
+    slab_mm: Optional[float] = SLAB_MM,
     in_plane_mm: float = TARGET_INPLANE_MM,
     crop_size: Optional[int] = None,
     center_on_mask: bool = True,
@@ -200,9 +228,14 @@ def build_sample_sitk(
     mask       : 3D sitk.Image, label on ONE slice; may live on its own grid
     crop_size  : side length in resampled pixels of a square patch around the
                  structure. None keeps the whole in-plane field of view.
+    slab_mm    : each image plane is the mean over a slab this thick, centred
+                 on the plane, so thin-slice volumes give the same planes as
+                 the same anatomy at 5 mm (see slab_offsets_mm). None or 0
+                 takes the single interpolated plane instead.
     returns    : (n_slices + 1, H, W) float32, HU values untouched
 
     The centre slice is taken from the mask unless `center_index` is given.
+    The mask channel is not averaged: it is the label on the centre plane.
     """
     if image.GetDimension() != 3 or mask.GetDimension() != 3:
         raise ValueError("both image and mask must be 3D")
@@ -236,14 +269,18 @@ def build_sample_sitk(
     else:
         ow = oh = int(crop_size)
 
-    # ---- three planes, z clamped inside the volume ------------------------- #
+    # ---- three planes, each a slab mean, z clamped inside the volume ------- #
     offsets = (np.arange(n_slices) - (n_slices - 1) / 2.0) * gap_mm
+    sub = slab_offsets_mm(slab_mm, sz)
     planes = []
     for off in offsets:
-        z = float(np.clip(cz + off / sz, 0.0, Z - 1))
-        p = image.TransformContinuousIndexToPhysicalPoint((cx, cy, z))
-        planes.append(_resample_plane(image, p, (ow, oh), direction, in_plane_mm,
-                                      sitk.sitkLinear, default_value))
+        acc = np.zeros((oh, ow), dtype=np.float64)
+        for s in sub:
+            z = float(np.clip(cz + (off + s) / sz, 0.0, Z - 1))
+            p = image.TransformContinuousIndexToPhysicalPoint((cx, cy, z))
+            acc += _resample_plane(image, p, (ow, oh), direction, in_plane_mm,
+                                   sitk.sitkLinear, default_value)
+        planes.append(acc / len(sub))
 
     # ---- mask on the centre slice ------------------------------------------ #
     p_center = image.TransformContinuousIndexToPhysicalPoint((cx, cy, float(cz)))

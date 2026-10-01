@@ -16,13 +16,14 @@ from .constants import (
     AIR_HU,
     CT_WINDOW,
     PIXEL_AREA_MM2,
+    SLAB_MM,
     SLICE_GAP_MM,
     TARGET_INPLANE_MM,
 )
 
 __version__ = "0.1.0"
 
-__all__ = ["TARGET_INPLANE_MM", "SLICE_GAP_MM", "PIXEL_AREA_MM2",
+__all__ = ["TARGET_INPLANE_MM", "SLICE_GAP_MM", "SLAB_MM", "PIXEL_AREA_MM2",
            "CT_WINDOW", "AIR_HU", "__version__"]
 
 
@@ -31,7 +32,7 @@ def __getattr__(name):
     _map = {
         "build_sample_sitk": "geometry", "build_samples_sitk": "geometry",
         "find_center_slice": "geometry", "mask_area_mm2": "geometry",
-        "mask_centroid_index": "geometry",
+        "mask_centroid_index": "geometry", "slab_offsets_mm": "geometry",
         "DistanceGate": "gating", "make_input": "gating", "falloff": "gating",
         "signed_distance_channel": "gating", "window_01": "gating",
         "gate_image": "gating",

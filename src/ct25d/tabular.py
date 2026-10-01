@@ -8,9 +8,12 @@ out at a different resolution-dependent shape and could not be batched.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
-__all__ = ["prepare_stacks", "split_indices"]
+__all__ = ["prepare_stacks", "split_indices", "load_stack_cache",
+           "save_stack_cache"]
 
 
 def prepare_stacks(
@@ -112,3 +115,34 @@ def split_indices(
     perm = rng.permutation(n)
     n_val = max(1, int(round(n * val_frac)))
     return np.sort(perm[n_val:]), np.sort(perm[:n_val])
+
+
+def save_stack_cache(path, stacks, kept, prep: dict) -> None:
+    """Write prepared stacks together with the settings that produced them."""
+    np.savez_compressed(path, stacks=stacks, kept=kept,
+                        prep=np.array(json.dumps(prep, sort_keys=True)))
+
+
+def load_stack_cache(path, prep: dict):
+    """
+    Returns (stacks, kept) from a cache written with the same settings.
+
+    A cache is only valid for the preprocessing that wrote it, and a stale one
+    is silent: the arrays load fine and the model trains on, or is evaluated
+    with, planes that no longer match its configuration. So the settings are
+    stored alongside and a mismatch is an error rather than a reuse.
+    """
+    z = np.load(path)
+    if "prep" not in z.files:
+        raise ValueError(
+            f"{path} has no record of its preprocessing settings (written by "
+            f"an older version); delete it so the stacks are rebuilt")
+    stored = json.loads(str(z["prep"]))
+    want = json.loads(json.dumps(prep, sort_keys=True))
+    diff = {k: (stored.get(k), want.get(k)) for k in set(stored) | set(want)
+            if stored.get(k) != want.get(k)}
+    if diff:
+        raise ValueError(
+            f"{path} was written with different preprocessing settings "
+            f"(cached, requested): {diff}; delete it or point --cache elsewhere")
+    return z["stacks"], z["kept"]

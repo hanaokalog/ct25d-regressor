@@ -24,7 +24,7 @@ from collections.abc import Sequence
 import numpy as np
 import SimpleITK as sitk
 
-from .constants import SLICE_GAP_MM, TARGET_INPLANE_MM
+from .constants import SLAB_MM, SLICE_GAP_MM, TARGET_INPLANE_MM
 from .geometry import (
     available_labels,
     binarize_label,
@@ -195,6 +195,10 @@ def crop_pair(
     }
 
 
-def default_margins(n_slices: int = 3, gap_mm: float = SLICE_GAP_MM) -> float:
-    """Through-plane margin that covers the neighbouring slices, plus one gap."""
-    return float(gap_mm * ((n_slices - 1) / 2.0 + 1.0))
+def default_margins(n_slices: int = 3, gap_mm: float = SLICE_GAP_MM,
+                    slab_mm: float = SLAB_MM) -> float:
+    """
+    Through-plane margin that covers the neighbouring slices and the half slab
+    averaged around the outermost one, with at least one gap to spare.
+    """
+    return float(gap_mm * (n_slices - 1) / 2.0 + max(gap_mm, (slab_mm or 0) / 2.0))

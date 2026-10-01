@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ct25d.constants import SLICE_GAP_MM, TARGET_INPLANE_MM
+from ct25d.constants import SLAB_MM, SLICE_GAP_MM, TARGET_INPLANE_MM
 from ct25d.crop import crop_pair, default_margins, required_margin_mm
 
 
@@ -62,6 +62,8 @@ def parse_args(argv=None):
     g.add_argument("--in-plane-mm", type=float, default=TARGET_INPLANE_MM)
     g.add_argument("--n-slices", type=int, default=3)
     g.add_argument("--gap-mm", type=float, default=SLICE_GAP_MM)
+    g.add_argument("--slab-mm", type=float, default=SLAB_MM,
+                   help="slab thickness train.py will average over")
     g.add_argument("--scale-min", type=float, default=0.9,
                    help="smallest augmentation zoom train.py will use")
     g.add_argument("--rotate-deg", type=float, default=5.0)
@@ -116,7 +118,8 @@ def main(argv=None):
     if margin is None:
         margin = 40.0
     margin_z = (args.margin_mm_z if args.margin_mm_z is not None
-                else default_margins(args.n_slices, args.gap_mm))
+                else default_margins(args.n_slices, args.gap_mm,
+                                 args.slab_mm))
     print(f"margins: {margin} mm in plane, {margin_z} mm through plane")
 
     df = pd.read_csv(args.csv)
