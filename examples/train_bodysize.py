@@ -146,7 +146,7 @@ def main(argv=None):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step()
-            total += float(loss) * len(zt)
+            total += float(loss.detach()) * len(zt)
             n += len(zt)
         sched.step()
 
