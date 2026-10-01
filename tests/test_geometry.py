@@ -22,7 +22,7 @@ def test_center_slice_is_found():
     assert find_center_slice(lab) == cz
 
 
-def test_center_slice_multi_slice_label_warns_and_averages(capsys):
+def test_center_slice_multi_slice_label_warns_and_takes_largest(capsys):
     _, lab, cz = make_case()
     arr = sitk.GetArrayFromImage(lab)
     arr[cz + 1] = arr[cz]                       # label now spans two slices
@@ -31,6 +31,19 @@ def test_center_slice_multi_slice_label_warns_and_averages(capsys):
     idx = find_center_slice(lab2)
     assert idx in (cz, cz + 1)
     assert "spans 2 slices" in capsys.readouterr().out
+
+
+def test_center_slice_with_a_gap_never_lands_on_an_empty_slice():
+    # labels on z = cz - 1 and cz + 1: a rounded centroid gives cz, which is empty
+    _, lab, cz = make_case()
+    arr = sitk.GetArrayFromImage(lab)
+    small = np.zeros_like(arr[cz])
+    small[arr[cz] > 0] = 1
+    small[: small.shape[0] // 2] = 0            # half the area
+    arr[cz - 1], arr[cz + 1], arr[cz] = small, arr[cz], 0
+    lab2 = sitk.GetImageFromArray(arr)
+    lab2.CopyInformation(lab)
+    assert find_center_slice(lab2) == cz + 1
 
 
 def test_planes_come_from_the_expected_source_slices():

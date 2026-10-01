@@ -1,4 +1,5 @@
-"""2.5D ResNet + CBAM backbone with a heteroscedastic regression head."""
+"""2.5D ResNet + CBAM backbone with a heteroscedastic regression head, or a
+classification head when `n_classes` is given."""
 
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Optional
@@ -115,6 +116,7 @@ class ResNet25DCBAMRegressor(nn.Module):
         logvar_min: float = -7.0,
         logvar_max: float = 7.0,
         logvar_margin: float = 1.0,
+        n_classes: int = 0,
     ):
         super().__init__()
         assert len(layers) == len(widths) == len(sa_kernels)
@@ -143,9 +145,19 @@ class ResNet25DCBAMRegressor(nn.Module):
         self.out_channels = in_ch
 
         self.dropout = nn.Dropout(dropout)
-        self.fc_mu = nn.Linear(in_ch, 1)
-        self.fc_logvar = nn.Linear(in_ch, 1)
+        # n_classes > 0 swaps the Gaussian head for class logits; the backbone
+        # is the same, so everything upstream of the head is shared.
+        self.n_classes = int(n_classes)
+        if self.n_classes > 0:
+            self.fc_logits = nn.Linear(in_ch, self.n_classes)
+        else:
+            self.fc_mu = nn.Linear(in_ch, 1)
+            self.fc_logvar = nn.Linear(in_ch, 1)
         self._init_weights()
+
+    @property
+    def is_classifier(self) -> bool:
+        return self.n_classes > 0
 
     def _init_weights(self):
         for m in self.modules():
@@ -158,6 +170,9 @@ class ResNet25DCBAMRegressor(nn.Module):
         for m in self.modules():
             if isinstance(m, BasicBlockCBAM2D) and hasattr(m.norm2, "weight"):
                 nn.init.zeros_(m.norm2.weight)
+        if self.is_classifier:
+            nn.init.zeros_(self.fc_logits.bias)
+            return
         nn.init.zeros_(self.fc_mu.bias)
         nn.init.zeros_(self.fc_logvar.bias)
         nn.init.normal_(self.fc_logvar.weight, std=1e-3)
@@ -185,10 +200,22 @@ class ResNet25DCBAMRegressor(nn.Module):
         for stage in self.stages:
             x = stage(x)
         x = self.dropout(torch.flatten(F.adaptive_avg_pool2d(x, 1), 1))
+        if self.is_classifier:
+            return self.fc_logits(x)
         return self.fc_mu(x), self._bound_logvar(self.fc_logvar(x))
 
     @torch.no_grad()
+    def predict_proba(self, x, temperature: float = 1.0):
+        """Class probabilities, with the logits divided by `temperature`."""
+        if not self.is_classifier:
+            raise RuntimeError("predict_proba needs a model built with n_classes")
+        self.eval()
+        return torch.softmax(self(x) / float(temperature), dim=1)
+
+    @torch.no_grad()
     def predict(self, x, standardizer: Optional["TargetStandardizer"] = None):
+        if self.is_classifier:
+            raise RuntimeError("a classifier predicts with predict_proba")
         self.eval()
         mu, log_var = self(x)
         sigma = torch.exp(0.5 * log_var)

@@ -156,3 +156,33 @@ def test_train_rejects_an_unknown_target(cohort, tmp_path):
         capture_output=True, text=True)
     assert out.returncode != 0
     assert "not in the CSV" in out.stdout + out.stderr
+
+
+def test_classification_with_a_test_split_and_cp932_csv(cohort, tmp_path):
+    df = pd.read_csv(cohort)
+    df["klass"] = (df["area_mm2"] > df["area_mm2"].median()).astype(int).astype(str)
+    df.loc[0, "klass"] = "FALSE"                      # a spreadsheet placeholder
+    df["ct"] = df["ct"].str.replace(str(cohort.parent), "/elsewhere", regex=False)
+    df["メモ"] = "テスト"
+    csv = tmp_path / "cls.csv"
+    df.to_csv(csv, index=False, encoding="cp932")
+
+    model, split = tmp_path / "cls.pt", tmp_path / "split.csv"
+    log = run("train.py", [
+        str(csv), "klass", str(model), "--task", "classification",
+        "--image-col", "ct", "--mask-col", "seg", "--group-col", "patient_id",
+        "--path-map", f"/elsewhere={cohort.parent}", "--hu-shift", "20",
+        "--crop-size", "48", "--epochs", "2", "--batch-size", "4",
+        "--val-frac", "0.3", "--test-frac", "0.3", "--split-out", str(split),
+        "--device", "cpu"])
+    assert "11 rows with a value" in log and "temperature" in log
+    assert "test (held out" in log
+    s = pd.read_csv(split)
+    assert set(s["split"]) == {"train", "val", "test"}
+
+    pred = tmp_path / "cls_pred.csv"
+    run("eval.py", [str(csv), "klass", str(model), "--out", str(pred),
+                    "--path-map", f"/elsewhere={cohort.parent}", "--device", "cpu"])
+    out = pd.read_csv(pred)
+    assert {"pred", "pred_conf", "prob_0", "prob_1"} <= set(out.columns)
+    assert np.allclose(out[["prob_0", "prob_1"]].sum(1), 1.0)

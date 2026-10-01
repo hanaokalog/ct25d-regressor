@@ -94,13 +94,14 @@ def test_gating_converges_to_the_window_floor_not_to_water(disc):
     far = g.weight(disc, 1)[0] == 0.0
     assert np.allclose(out[0][far], 0.0)                       # background
     lo, hi = CT_WINDOW
-    assert np.isclose(out[0][far][0] * (hi - lo) + lo, lo)     # = -100 HU, not 0 HU
+    assert np.isclose(out[0][far][0] * (hi - lo) + lo, lo)  # window floor, not 0 HU
 
 
 def test_window_01_clips_and_scales():
     x = np.array([-1024.0, -100.0, 450.0, 1000.0, 3000.0], np.float32)
-    w = window_01(x)
+    w = window_01(x, (-100.0, 1000.0))
     assert np.allclose(w, [0.0, 0.0, 0.5, 1.0, 1.0])
+    assert np.allclose(window_01(np.array([-3024.0, 0.0, 1000.0])), [0.0, 0.5, 1.0])
 
 
 def test_signed_distance_channel(disc):
@@ -121,7 +122,8 @@ def test_make_input_channel_layout(stack_hu):
 
 
 def test_make_input_context_channel_is_not_gated(stack_hu):
-    out = make_input(stack_hu, DistanceGate(10.0, PX), keep_context=True)
+    out = make_input(stack_hu, DistanceGate(10.0, PX), window=(-100.0, 1000.0),
+                     keep_context=True)
     gated_centre, context = out[1], out[3]
     assert context.min() < gated_centre.min() + 1e-6
     assert (np.abs(context) > 1e-6).sum() > (np.abs(gated_centre + 1) > 1e-6).sum()

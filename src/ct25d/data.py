@@ -3,6 +3,7 @@
 The order of operations matters and is fixed here:
 
     augment (HU domain, binary mask)
+        -> HU shift (one uniform offset per case, image channels only)
         -> recompute the distance gate from the AUGMENTED mask
         -> window to [0, 1], gate, rescale to [-1, 1]
         -> standardize the target
@@ -34,8 +35,17 @@ class SliceStackDataset(Dataset):
     target_scale_power : 0 scale-invariant, 1 length-like, 2 area-like. Zoom
                    augmentation changes the apparent size of the structure, so
                    a size-related label has to follow it.
+    hu_shift     : add one offset drawn from U(-hu_shift, +hu_shift) to every
+                   image channel of a case, before windowing. Simulates
+                   calibration drift between scanners and the enhancement a
+                   contrast phase adds, so a model that should not depend on
+                   the phase cannot learn the absolute HU level. 0 disables.
+    task         : 'regression' returns the standardized target; 'classification'
+                   returns the class index as a long tensor and ignores the
+                   standardizer, which may be None.
 
-    Returns (x, z) where x is the network input and z the standardized target.
+    Returns (x, z) where x is the network input and z the standardized target
+    (or the class index).
     """
 
     def __init__(
@@ -49,7 +59,11 @@ class SliceStackDataset(Dataset):
         window: tuple[float, float] = CT_WINDOW,
         mask_channel: str = "sdf",
         keep_context: bool = False,
+        hu_shift: float = 0.0,
+        task: str = "regression",
     ):
+        if task not in ("regression", "classification"):
+            raise ValueError(f"unknown task: {task}")
         if len(stacks) != len(targets):
             raise ValueError("stacks and targets must have the same length")
         self.stacks = stacks
@@ -61,6 +75,8 @@ class SliceStackDataset(Dataset):
         self.window = window
         self.mask_channel = mask_channel
         self.keep_context = keep_context
+        self.hu_shift = float(hu_shift)
+        self.task = task
 
     def __len__(self) -> int:
         return len(self.targets)
@@ -79,12 +95,18 @@ class SliceStackDataset(Dataset):
 
         if self.augment is not None:
             x, scale = self.augment(x)          # HU domain; mask stays binary
-            if self.power:
+            if self.power and self.task == "regression":
                 y = y * (float(scale) ** self.power)
+        if self.hu_shift > 0:
+            # torch's generator, not numpy's: DataLoader workers get distinct
+            # torch seeds but would all inherit the same numpy state
+            x[:-1] += float(torch.empty(()).uniform_(-self.hu_shift, self.hu_shift))
 
         arr = make_input(x.numpy(), gate=self.gate, window=self.window,
                          mask_channel=self.mask_channel,
                          keep_context=self.keep_context)
 
+        if self.task == "classification":
+            return torch.from_numpy(arr), torch.tensor(int(round(y)), dtype=torch.long)
         z = self.std.transform(np.array([y], dtype=np.float32))
         return torch.from_numpy(arr), torch.as_tensor(z, dtype=torch.float32)

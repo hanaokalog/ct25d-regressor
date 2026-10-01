@@ -64,9 +64,10 @@ def find_center_slice(mask: sitk.Image, label_value: int = 1) -> int:
     """
     Index (along the image's k axis) of the slice carrying the label.
 
-    If the label spans several slices, the intensity-weighted centroid is used
-    and rounded; the caller is told, because for this task the mask is expected
-    on exactly one slice.
+    If the label spans several slices, the slice with the largest labelled area
+    is used (the first one on a tie); the caller is told, because for this task
+    the mask is expected on exactly one slice. A centroid would be wrong here:
+    labels on slices 72 and 74 round to 73, which carries no label at all.
     """
     arr = sitk.GetArrayViewFromImage(mask)          # (z, y, x)
     hit = label_hit(arr, label_value)
@@ -75,10 +76,9 @@ def find_center_slice(mask: sitk.Image, label_value: int = 1) -> int:
     if nz.size == 0:
         _require_label(mask, label_value)
     if nz.size > 1:
-        w = per_slice[nz].astype(np.float64)
-        c = int(round(float((nz * w).sum() / w.sum())))
+        c = int(np.argmax(per_slice))
         print(f"[warn] label spans {nz.size} slices ({nz.min()}-{nz.max()}); "
-              f"using slice {c}")
+              f"using slice {c}, the one with the largest area")
         return c
     return int(nz[0])
 

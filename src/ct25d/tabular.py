@@ -12,8 +12,75 @@ import json
 
 import numpy as np
 
-__all__ = ["prepare_stacks", "split_indices", "load_stack_cache",
-           "save_stack_cache"]
+__all__ = ["read_table", "parse_path_map", "apply_path_map", "prepare_stacks",
+           "split_indices", "split_three", "load_stack_cache", "save_stack_cache"]
+
+ENCODINGS = ("utf-8-sig", "cp932")
+
+
+def read_table(path, encoding: str | None = None, **kwargs):
+    """
+    Read a CSV whose encoding is not known in advance.
+
+    Lists written on Windows arrive as UTF-8, UTF-8 with a BOM, or CP932
+    (Shift_JIS), and a wrong guess either fails or -- worse -- reads a BOM into
+    the first column name, so `id` silently becomes `\ufeffid`. `utf-8-sig`
+    reads plain UTF-8 and strips a BOM, so trying it before CP932 covers all
+    three. Column names and string cells are stripped of surrounding
+    whitespace, which is how Excel exports tend to pad them.
+    """
+    import pandas as pd
+
+    tried = []
+    for enc in ([encoding] if encoding else ENCODINGS):
+        try:
+            df = pd.read_csv(path, encoding=enc, **kwargs)
+            break
+        except UnicodeDecodeError as err:
+            tried.append(f"{enc}: {err}")
+    else:
+        raise ValueError(f"cannot decode {path}; tried " + "; ".join(tried))
+    df.columns = [str(c).strip() for c in df.columns]
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].map(lambda v: v.strip() if isinstance(v, str) else v)
+    return df
+
+
+def parse_path_map(specs) -> list[tuple[str, str]]:
+    """'/home/hanaoka=/mnt/w' -> [('/home/hanaoka', '/mnt/w')]."""
+    out = []
+    for spec in specs or ():
+        if "=" not in spec:
+            raise ValueError(f"--path-map takes OLD=NEW, got {spec!r}")
+        old, new = spec.split("=", 1)
+        out.append((old, new))
+    return out
+
+
+def apply_path_map(df, columns, mapping):
+    """
+    Rewrite path prefixes in `columns`, so a list written on one machine can be
+    read on another where the same files are mounted elsewhere. Only a leading
+    prefix that ends at a path separator is replaced. Returns a copy.
+    """
+    if not mapping:
+        return df
+    df = df.copy()
+
+    def remap(v):
+        if not isinstance(v, str):
+            return v
+        for old, new in mapping:
+            o = old.rstrip("/")
+            if v == o or v.startswith(o + "/"):
+                return new.rstrip("/") + v[len(o):]
+        return v
+
+    for c in columns:
+        if c in df.columns:
+            df[c] = df[c].map(remap)
+    return df
 
 
 def prepare_stacks(
@@ -115,6 +182,53 @@ def split_indices(
     perm = rng.permutation(n)
     n_val = max(1, int(round(n * val_frac)))
     return np.sort(perm[n_val:]), np.sort(perm[:n_val])
+
+
+def split_three(
+    df,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
+    group_col: str | None = None,
+    split_col: str | None = None,
+    seed: int = 0,
+):
+    """
+    Returns (train_pos, val_pos, test_pos) as positional indices.
+
+    As split_indices, with a held-out test split that neither training nor
+    calibration ever sees. `split_col` is used verbatim when given, with values
+    'train' / 'val' / 'test'; rows with any other value are left out of all
+    three. Otherwise the groups (or rows) are shuffled once with `seed` and cut
+    into test, val and train in that order, so the same seed always gives the
+    same split.
+    """
+    if split_col is not None:
+        if split_col not in df.columns:
+            raise KeyError(f"column {split_col!r} not in the CSV")
+        v = df[split_col].astype(str).str.strip().str.lower().to_numpy()
+        train = np.flatnonzero(np.isin(v, ["train", "training"]))
+        val = np.flatnonzero(np.isin(v, ["val", "valid", "validation"]))
+        test = np.flatnonzero(np.isin(v, ["test"]))
+        if len(train) == 0 or len(val) == 0:
+            raise ValueError(f"{split_col!r} must contain both train and val rows")
+        return train, val, test
+
+    rng = np.random.default_rng(seed)
+    if group_col is not None:
+        if group_col not in df.columns:
+            raise KeyError(f"column {group_col!r} not in the CSV")
+        groups = df[group_col].astype(str).to_numpy()
+    else:
+        groups = np.arange(len(df)).astype(str)
+    uniq = np.unique(groups)
+    rng.shuffle(uniq)
+    n_test = int(round(len(uniq) * test_frac))
+    n_val = max(1, int(round(len(uniq) * val_frac)))
+    test_g = set(uniq[:n_test].tolist())
+    val_g = set(uniq[n_test:n_test + n_val].tolist())
+    which = np.array([2 if g in test_g else 1 if g in val_g else 0 for g in groups])
+    return (np.flatnonzero(which == 0), np.flatnonzero(which == 1),
+            np.flatnonzero(which == 2))
 
 
 def save_stack_cache(path, stacks, kept, prep: dict) -> None:

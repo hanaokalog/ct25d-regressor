@@ -25,11 +25,23 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ct25d.calibration import fit_sigma_scale, uncertainty_report
+from ct25d.calibration import (
+    classification_report,
+    fit_sigma_scale,
+    fit_temperature,
+    uncertainty_report,
+)
 from ct25d.checkpoint import load_checkpoint
 from ct25d.data import SliceStackDataset
 from ct25d.gating import DistanceGate
-from ct25d.tabular import load_stack_cache, prepare_stacks, save_stack_cache
+from ct25d.tabular import (
+    apply_path_map,
+    load_stack_cache,
+    parse_path_map,
+    prepare_stacks,
+    read_table,
+    save_stack_cache,
+)
 
 
 def parse_args(argv=None):
@@ -43,6 +55,11 @@ def parse_args(argv=None):
     p.add_argument("--image-col", default=None, help="override the trained column")
     p.add_argument("--mask-col", default=None, help="override the trained column")
     p.add_argument("--cache", type=Path, default=None)
+    p.add_argument("--encoding", default=None)
+    p.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW")
+    p.add_argument("--split-col", default=None,
+                   help="evaluate only the rows whose value here is --split")
+    p.add_argument("--split", default="test")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -52,6 +69,16 @@ def parse_args(argv=None):
                    help="refit the sigma scale on THIS set; only valid if it is a "
                         "held-out calibration split, never the test set you report")
     return p.parse_args(argv)
+
+
+@torch.no_grad()
+def predict_logits(model, loader, device):
+    model.eval()
+    out = []
+    for batch in loader:
+        x = batch[0] if isinstance(batch, (list, tuple)) else batch
+        out.append(model(x.to(device)).float().cpu())
+    return torch.cat(out).numpy()
 
 
 @torch.no_grad()
@@ -73,9 +100,11 @@ def main(argv=None):
     model, std, cfg, sigma_scale, train_metrics = load_checkpoint(
         args.model, map_location=args.device)
     model.to(args.device)
+    classify = cfg.get("task", "regression") == "classification"
     print(f"{args.model}: trained on {cfg['target']!r}, "
           f"{cfg['crop_size']}px crop, {cfg['n_slices']} slices, "
-          f"sigma scale {sigma_scale:.3f}")
+          + (f"temperature {cfg['temperature']:.3f}" if classify
+             else f"sigma scale {sigma_scale:.3f}"))
     if train_metrics:
         print("  training run reported "
               + ", ".join(f"{k}={v:.4g}" for k, v in train_metrics.items()
@@ -84,9 +113,13 @@ def main(argv=None):
         print(f"[warn] the checkpoint was trained on {cfg['target']!r}, "
               f"evaluating against {args.target!r}")
 
-    df = pd.read_csv(args.csv)
+    df = read_table(args.csv, encoding=args.encoding)
+    if args.split_col is not None:
+        keep = df[args.split_col].astype(str).str.strip().str.lower() == args.split
+        df = df[keep].reset_index(drop=True)
     has_truth = args.target in df.columns
     if has_truth:
+        df[args.target] = pd.to_numeric(df[args.target], errors="coerce")
         df = df[df[args.target].notna()].reset_index(drop=True)
     else:
         print(f"[info] {args.target!r} not in the CSV; predicting only")
@@ -94,6 +127,7 @@ def main(argv=None):
 
     image_col = args.image_col or cfg["image_col"]
     mask_col = args.mask_col or cfg["mask_col"]
+    df = apply_path_map(df, [image_col, mask_col], parse_path_map(args.path_map))
     prep = dict(image_col=image_col, mask_col=mask_col,
                 crop_size=cfg["crop_size"], n_slices=cfg["n_slices"],
                 gap_mm=cfg["gap_mm"], in_plane_mm=cfg["in_plane_mm"],
@@ -124,9 +158,15 @@ def main(argv=None):
     ds = SliceStackDataset(stacks, y, standardizer=std, augment=None, gate=gate,
                            target_scale_power=0, window=tuple(cfg["window"]),
                            mask_channel=cfg["mask_channel"],
-                           keep_context=cfg["keep_context"])
+                           keep_context=cfg["keep_context"],
+                           task=cfg.get("task", "regression"))
     loader = DataLoader(ds, batch_size=args.batch_size,
                         num_workers=args.num_workers)
+    path = args.out or args.csv.with_suffix(".pred.csv")
+
+    if classify:
+        evaluate_classifier(model, loader, df, y, has_truth, cfg, path, args)
+        return
 
     mu_z, sigma_z = predict(model, loader, args.device)
 
@@ -154,7 +194,6 @@ def main(argv=None):
         out["residual"] = y - mean
         out["z_score"] = (y_z - mu_z) / sigma_zc
 
-    path = args.out or args.csv.with_suffix(".pred.csv")
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
     print(f"wrote {path}")
@@ -184,6 +223,39 @@ def main(argv=None):
     if rep["corr_abs_err"] < 0.2:
         print("[warn] sigma correlates weakly with the actual error, so it is "
               "close to a constant and adds little per case.")
+
+
+def evaluate_classifier(model, loader, df, y, has_truth, cfg, path, args):
+    logits = predict_logits(model, loader, args.device)
+    t = 1.0 if args.no_calibration else cfg["temperature"]
+    if args.refit_calibration:
+        if not has_truth:
+            raise SystemExit("--refit-calibration needs the target column")
+        t = fit_temperature(logits, y.astype(int))
+        print(f"refit temperature on this set: {t:.3f}")
+    z = logits / t
+    z = z - z.max(axis=1, keepdims=True)
+    prob = np.exp(z) / np.exp(z).sum(axis=1, keepdims=True)
+
+    out = df.copy()
+    out["pred"] = prob.argmax(1)
+    out["pred_conf"] = prob.max(1)
+    for k in range(prob.shape[1]):
+        out[f"prob_{k}"] = prob[:, k]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
+    print(f"wrote {path}")
+    if not has_truth:
+        print(f"predicted classes: {np.bincount(prob.argmax(1)).tolist()}")
+        return
+    rep = classification_report(prob, y.astype(int))
+    print(f"\nevaluation of {args.target}:")
+    for k, v in rep.items():
+        if k != "confusion":
+            print(f"  {k:14s} {v:.4f}")
+    print("  confusion (rows truth, columns prediction):")
+    for row in rep["confusion"]:
+        print("    " + " ".join(f"{c:5d}" for c in row))
 
 
 if __name__ == "__main__":

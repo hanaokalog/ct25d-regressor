@@ -21,7 +21,8 @@ from .transforms import TargetStandardizer
 
 __all__ = ["build_model", "save_checkpoint", "load_checkpoint", "FORMAT_VERSION"]
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2          # 2 adds the classification task and temperature
+_READABLE = (1, 2)
 
 _ARCHITECTURES = {
     "resnet18": resnet18_cbam25d,
@@ -42,18 +43,23 @@ def build_model(arch: dict) -> torch.nn.Module:
 def save_checkpoint(
     path,
     model: torch.nn.Module,
-    standardizer: TargetStandardizer,
+    standardizer: TargetStandardizer | None,
     config: dict,
     sigma_scale: float = 1.0,
     metrics: dict | None = None,
+    temperature: float = 1.0,
 ) -> None:
+    """A classifier has no standardizer (pass None) and is calibrated by
+    `temperature` instead of `sigma_scale`."""
     torch.save(
         {
             "format_version": FORMAT_VERSION,
             "state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
-            "standardizer": standardizer.state_dict(),
+            "standardizer": (None if standardizer is None
+                             else standardizer.state_dict()),
             "config": config,
             "sigma_scale": float(sigma_scale),
+            "temperature": float(temperature),
             "metrics": dict(metrics or {}),
         },
         str(path),
@@ -61,13 +67,22 @@ def save_checkpoint(
 
 
 def load_checkpoint(path, map_location: Any = "cpu"):
-    """Returns (model in eval mode, standardizer, config, sigma_scale, metrics)."""
+    """
+    Returns (model in eval mode, standardizer, config, sigma_scale, metrics).
+
+    For a classifier the standardizer is None and the calibration temperature
+    is in config["temperature"].
+    """
     ckpt = torch.load(str(path), map_location=map_location, weights_only=True)
-    if ckpt.get("format_version") != FORMAT_VERSION:
+    if ckpt.get("format_version") not in _READABLE:
         raise ValueError(f"checkpoint format {ckpt.get('format_version')} "
-                         f"!= expected {FORMAT_VERSION}")
+                         f"is not one of {_READABLE}")
     model = build_model(ckpt["config"]["arch"])
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
-    std = TargetStandardizer().load_state_dict(ckpt["standardizer"])
-    return model, std, ckpt["config"], float(ckpt["sigma_scale"]), ckpt["metrics"]
+    std = (None if ckpt["standardizer"] is None
+           else TargetStandardizer().load_state_dict(ckpt["standardizer"]))
+    config = dict(ckpt["config"])
+    config.setdefault("task", "regression")
+    config["temperature"] = float(ckpt.get("temperature", 1.0))
+    return model, std, config, float(ckpt["sigma_scale"]), ckpt["metrics"]
