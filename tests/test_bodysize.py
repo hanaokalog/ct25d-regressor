@@ -22,6 +22,7 @@ from ct25d.bodysize import (  # noqa: E402
     prepare_case,
     save_bodysize,
     save_case,
+    select_inputs,
 )
 from ct25d.transforms import TargetStandardizer  # noqa: E402
 
@@ -161,3 +162,18 @@ def test_train_bodysize_cli(tmp_path):
     _, _, cfg, scales, metrics = load_bodysize(tmp_path / "bs.pt")
     assert cfg["geometry"]["rows"] == 64 and set(scales) == {"height", "weight"}
     assert "test_weight_mae" in metrics
+
+
+def test_a_smaller_field_of_view_cuts_the_axial_planes_too():
+    c = prepare_case(*phantom(radius_mm=120.0), 70.0, -10.0, geometry=SMALL)
+    k = FOV_RADII_MM.index(175.0)
+    _, full = select_inputs(c)
+    _, cut = select_inputs(c, fov_index=k)
+    inside = c["axial_dist"].astype(np.float32) <= 175.0
+    assert np.allclose(cut[0][inside], full[0][inside])           # L1 value
+    assert (cut[0][~inside] == 0).all() and (cut[1][~inside] == 0).all()
+    assert full[1][~inside].max() > 0                            # was imaged before
+    # the trim leaves only the kept rows of the projections
+    proj, _ = select_inputs(c, trim=(10, 40))
+    assert (proj[:, :10] == 0).all() and (proj[:, 41:] == 0).all()
+    assert proj[2, 10:41].max() > 0

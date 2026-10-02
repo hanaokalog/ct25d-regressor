@@ -16,7 +16,8 @@ from .constants import AIR_HU, SLAB_MM, SLICE_GAP_MM, TARGET_INPLANE_MM
 __all__ = ["available_labels", "label_hit", "binarize_label", "find_center_slice",
            "mask_area_mm2", "mask_centroid_index", "mask_extent_mm",
            "required_patch_size", "slab_offsets_mm", "build_sample_sitk",
-           "build_samples_sitk"]
+           "build_samples_sitk",
+           "with_direction"]
 
 
 def available_labels(mask: sitk.Image, limit: int = 20) -> list:
@@ -312,3 +313,31 @@ def build_samples_sitk(
             f"inconsistent output shapes {shapes}; pass crop_size to fix the "
             "patch size, or batch with a collate function that pads")
     return np.stack(out)
+
+
+def with_direction(image: sitk.Image, mask: sitk.Image, direction):
+    """
+    Copies of image and mask with their direction cosines replaced.
+
+    For code that works in physical space (ct25d.bodysize) on data whose
+    headers disagree about which way z runs: with the slices in a known index
+    order (e.g. index 0 cranial), forcing one direction gives every volume the
+    same physical frame. build_sample_sitk does not need it -- its planes are
+    taken in index order, whatever the header says. Only the direction
+    changes, so image and mask must share one grid. None returns the inputs
+    unchanged.
+    """
+    if direction is None:
+        return image, mask
+    if (image.GetSize() != mask.GetSize()
+            or not np.allclose(image.GetOrigin(), mask.GetOrigin(), atol=1e-3)
+            or not np.allclose(image.GetSpacing(), mask.GetSpacing(), rtol=1e-4)
+            or not np.allclose(image.GetDirection(), mask.GetDirection(), atol=1e-4)):
+        raise ValueError("a direction override needs the image and the mask "
+                         "on one grid")
+    out = []
+    for im in (image, mask):
+        im = sitk.Image(im)
+        im.SetDirection(tuple(float(v) for v in direction))
+        out.append(im)
+    return tuple(out)

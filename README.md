@@ -4,7 +4,8 @@
 
 Given a CT volume and a binary mask of a structure on one slice, the model
 predicts a scalar quantity about that structure together with a per-case
-uncertainty. Three 5 mm slabs 5 mm apart are stacked as channels, the image is
+uncertainty, or a class with calibrated probabilities (`--task
+classification`). Three 5 mm slabs 5 mm apart are stacked as channels, the image is
 gated to a 1 cm neighbourhood of the structure, and a ResNet with CBAM
 attention outputs a Gaussian mean and variance.
 
@@ -122,7 +123,24 @@ of these from the file rather than from flags, so evaluation cannot drift from
 training; the only thing it takes from the command line is where the data is.
 It reports the calibration diagnostics, warns when `z_std` has moved away from
 1 on the new set, and writes per-case predictions with 95% intervals. If the
-target column is missing it predicts anyway and skips the report.
+target column is missing it predicts anyway and skips the report;
+`--keep-unlabelled` also predicts the rows whose target is empty (for
+imputation), and the report then covers the labelled rows only.
+
+Other options worth knowing:
+
+| option | what it does |
+|---|---|
+| `--task classification --n-classes K` | integer labels 0..K-1, cross-entropy head, temperature scaling on the validation split; `eval.py` writes `pred`, `pred_conf`, `prob_0..K-1` |
+| `--label-smoothing` | for the classification loss |
+| `--test-frac`, `--split-col`, `--split-out` | a held-out test split reported once after training; or a fixed `train`/`val`/`test` column; and the split actually used, written to a CSV |
+| `--encoding` | CSV encoding; by default UTF-8, UTF-8 with BOM and CP932 are tried in turn, and spaces around values are stripped |
+| `--path-map OLD=NEW` | rewrite a path prefix in the image and mask columns, e.g. a table written on another machine |
+| `--hu-shift X` | add one uniform offset in [-X, X] HU per case before windowing (training only), e.g. to make a model robust to contrast enhancement |
+| `--prep-workers N` | read and resample the volumes in N processes (identical result; reading dominates on network storage) |
+
+Spreadsheet placeholders in the target column (`#N/A`, `FALSE`, empty) are
+read as missing; those rows are left out of training.
 
 ### Reading the training log
 
@@ -215,7 +233,13 @@ that appears only on augmented samples. `--for-crop-size 96` gives 52 mm.
 ## Preprocessing geometry
 
 In-plane pixels are resampled to **0.78125 mm** and the three slices are taken
-**5 mm** apart in physical space, from `constants.py`. Everything is resolved
+**5 mm** apart, from `constants.py`. The centre slice is the one carrying the
+label; if the label spans several slices, the one with the largest labelled
+area (a rounded centroid can land on an unlabelled slice in between). The
+neighbouring planes are taken along the volume's slice axis in **index
+order** — plane 0 is the lower index — so their order does not depend on the
+sign of the z direction cosine; volumes whose headers disagree about which way
+z runs still give the same stacks as long as their slices run the same way. Everything is resolved
 through SimpleITK in physical coordinates, so oblique direction cosines,
 differing origins, and a mask stored on its own grid all work.
 
@@ -241,6 +265,10 @@ is 5 / 0.78125 = 6.4; a 3×3×3 kernel would span 1.56 mm in plane against 10 mm
 through plane. Channel stacking also lets the first convolution learn
 z-position-specific weights, which is what we want, since only the centre slice
 carries the mask.
+
+The HU window applied after gating is `CT_WINDOW = (-1000, 1000)`: air
+through cortical bone, so fat and contrast-enhanced vessels both stay visible.
+Change it with `--window LO HI`; it is stored in the checkpoint.
 
 ## Distance gating
 
@@ -302,20 +330,83 @@ threshold does not conserve area exactly; measured error is under 1% when
 upsampling but around 8% for a 7 mm structure resampled from 0.7 mm. The
 resampled mask is an input cue, not the source of truth for the label.
 
+## Inference inside a pipeline
+
+`ct25d.inference.Predictor` runs one image/label pair through a checkpoint
+with exactly the preprocessing of `eval.py` (tested to give the same numbers):
+
+```python
+from ct25d.inference import Predictor
+
+p = Predictor("age.pt", device="cuda")
+r = p.predict(ct_image, label_image)      # SimpleITK images
+# regression:     {"mean", "sigma", "lo95", "hi95"}  (calibrated sigma)
+# classification: {"pred", "conf", "probs"}           (temperature applied)
+```
+
+## Body size: `ct25d.bodysize`
+
+Height and weight from a trunk CT, two Gaussian heads on one network:
+
+```
+CT + body-trunk mask + L1/L3 positions
+  └─ bodysize.prepare_case     projections and the L1/L3 planes, in an L3-anchored frame
+  └─ bodysize.BodySizeDataset  scan-coverage augmentation
+  └─ bodysize.BodySizeNet      two ResNet-CBAM backbones -> (mu, log_var) per target
+```
+
+* **Projections**: the trunk resampled to 2 mm, 512 rows from L3 + 384 mm
+  (row 0, cranial) down to L3 - 640 mm and 256 columns centred on the trunk;
+  maximum and mean intensity along x and along y, each with a validity map
+  (the fraction of the ray inside the scanned z range and the reconstruction
+  field of view). Not imaged reads as air with validity 0.
+* **Axial planes**: L1 and L3 at 1 mm, 512 × 512, with validity, plus the
+  planes one slice either side for jitter.
+* **Augmentation** for varied coverage: a craniocaudal trim that always keeps
+  L1..L3, a smaller reconstruction field of view (projections precomputed for
+  radii 250, 225, 200 and 175 mm, since the projection of a cut volume is not a
+  cut of the projection), and ±1 slice for the axial planes.
+* The frame is physical, so the header must say which way z runs. When the
+  slices are known to run head first but the headers disagree, give every
+  volume one direction first with `geometry.with_direction(image, label,
+  (1, 0, 0, 0, 1, 0, 0, 0, -1))`.
+* The body-trunk mask (arms and table removed) is the caller's; the image
+  itself is not altered outside it.
+
+```python
+from ct25d.bodysize import level_z_mm, prepare_case, save_case
+
+case = prepare_case(ct, trunk_mask, level_z_mm(l1_label), level_z_mm(l3_label))
+save_case("case.npz", case)
+```
+
+```bash
+python examples/train_bodysize.py cases.csv bodysize.pt --split-col split
+```
+
+The CSV has a `case` column (the `.npz` files), `height`, `weight` and the
+split. The checkpoint carries the weights, the input geometry, a standardizer
+and a calibrated sigma scale per target; `load_bodysize` and
+`predict_bodysize` read it back.
+
 ## Tests
 
 ```bash
 pytest
 ```
 
-136 tests covering resampling geometry against known slice positions, slab
+159 tests covering resampling geometry against known slice positions, slab
 averaging across slice thicknesses, log-space intervals, flipped
 direction cosines, border clamping, falloff continuity, the gating intensity
 domain, exact affine rotation on non-square images, the standardizer round
 trip, the loss schedule, and an end-to-end run of all three CLIs against real
 `.nii.gz` files with mismatched voxel and matrix sizes, including the
 equivalence of the pipeline output before and after cropping and the isolation
-of one label from a touching neighbour. Tests requiring
+of one label from a touching neighbour; classification with temperature
+scaling, CSV encodings and the three-way split, parallel preparation against
+the serial one, `Predictor` against `eval.py`, and the body-size inputs on a
+phantom of known size (rows, widths, validity, field of view, orientation,
+augmentation and a training run). Tests requiring
 `torch`, `SimpleITK` or `pandas` skip cleanly if those are absent.
 
 ## Notes

@@ -66,3 +66,21 @@ def test_hu_shift_is_uniform_over_the_image_and_spares_the_mask():
         assert y.dtype == torch.long
         vals.add(round(float(hu), 3))
     assert len(vals) > 1
+
+
+def test_format_1_checkpoints_still_load_and_unknown_ones_are_refused(tmp_path):
+    from ct25d.transforms import TargetStandardizer
+
+    arch = dict(name="resnet18", n_slices=3, n_mask_channels=1, norm="group")
+    net = build_model(arch)
+    std = TargetStandardizer().fit([1.0, 3.0])
+    old = {"format_version": 1, "state_dict": net.state_dict(),
+           "standardizer": std.state_dict(), "config": {"arch": arch},
+           "sigma_scale": 1.5, "metrics": {}}      # no task, no temperature
+    torch.save(old, tmp_path / "v1.pt")
+    _, std2, cfg, scale, _ = load_checkpoint(tmp_path / "v1.pt")
+    assert cfg["task"] == "regression" and cfg["temperature"] == 1.0
+    assert scale == 1.5 and std2.mean_ == std.mean_
+    torch.save(dict(old, format_version=99), tmp_path / "v99.pt")
+    with pytest.raises(ValueError):
+        load_checkpoint(tmp_path / "v99.pt")

@@ -176,3 +176,27 @@ def test_slab_at_the_volume_border_clamps_instead_of_reading_air():
     # centre plane: samples at -2..2 mm, the negative ones clamp to slice 0
     assert round(float(np.median(s[1]))) == round((0 + 0 + 0 + 100 + 200) / 5)
     assert float(s[:3].min()) >= 0.0
+
+
+def test_planes_follow_the_index_order_not_the_header(case):
+    """with_direction changes the physical frame; the 2.5D planes do not care."""
+    from ct25d.geometry import build_sample_sitk, with_direction
+
+    img, lab, cz = case                       # slice k holds 100 * k HU
+    flipped = with_direction(img, lab, (1, 0, 0, 0, 1, 0, 0, 0, -1))
+    assert flipped[0].GetDirection()[8] == -1.0 and img.GetDirection()[8] == 1.0
+    a = build_sample_sitk(img, lab, n_slices=3, gap_mm=2.5, slab_mm=0, crop_size=32)
+    b = build_sample_sitk(*flipped, n_slices=3, gap_mm=2.5, slab_mm=0, crop_size=32)
+    assert np.allclose(a, b)
+    assert a[0, 16, 16] == 100.0 * (cz - 1) and a[2, 16, 16] == 100.0 * (cz + 1)
+    assert with_direction(img, lab, None) == (img, lab)
+
+
+def test_direction_override_needs_one_grid(case):
+    from ct25d.geometry import with_direction
+
+    img, lab, _ = case
+    other = sitk.Image(lab)
+    other.SetOrigin((0.0, 0.0, 0.0))
+    with pytest.raises(ValueError):
+        with_direction(img, other, (1, 0, 0, 0, 1, 0, 0, 0, -1))
