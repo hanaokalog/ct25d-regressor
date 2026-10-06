@@ -7,7 +7,7 @@ network inputs; examples/train_bodysize.py trains on a table of such cases.
 """
 
 from .checkpoint import load_bodysize, save_bodysize
-from .data import BodySizeDataset, select_inputs
+from .data import BodySizeDataset, SingleLevelDataset, drop_shift, select_inputs
 from .model import TARGETS, BodySizeNet
 from .predict import predict_bodysize
 from .preprocess import (
@@ -20,5 +20,6 @@ from .preprocess import (
 )
 
 __all__ = ["BodySizeDataset", "BodySizeGeometry", "BodySizeNet", "FOV_RADII_MM",
-           "TARGETS", "level_z_mm", "load_bodysize", "load_case", "predict_bodysize",
-           "prepare_case", "save_bodysize", "save_case", "select_inputs"]
+           "SingleLevelDataset", "TARGETS", "drop_shift", "level_z_mm",
+           "load_bodysize", "load_case", "predict_bodysize", "prepare_case",
+           "save_bodysize", "save_case", "select_inputs"]

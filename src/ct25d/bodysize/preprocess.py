@@ -39,15 +39,20 @@ OUTSIDE_FOV_HU = -2000.0
 
 class BodySizeGeometry:
     def __init__(self, proj_mm=2.0, rows=512, cols=256, l3_row=192,
-                 axial_mm=1.0, axial_size=512, window=(-1000.0, 1000.0)):
+                 axial_mm=1.0, axial_size=512, window=(-1000.0, 1000.0),
+                 l1_l3_mm=65.0):
         self.proj_mm, self.rows, self.cols, self.l3_row = proj_mm, rows, cols, l3_row
         self.axial_mm, self.axial_size = axial_mm, axial_size
         self.window = tuple(window)
+        # typical L1-L3 distance, to place the frame when only one level is
+        # known (the median of train_data, 5th-95th percentile 50-75 mm)
+        self.l1_l3_mm = float(l1_l3_mm)
 
     def as_dict(self):
         return dict(proj_mm=self.proj_mm, rows=self.rows, cols=self.cols,
                     l3_row=self.l3_row, axial_mm=self.axial_mm,
-                    axial_size=self.axial_size, window=list(self.window))
+                    axial_size=self.axial_size, window=list(self.window),
+                    l1_l3_mm=self.l1_l3_mm)
 
     def row_of(self, z_mm, z_l3_mm):
         """Projection row of a physical z (LPS, cranial is +z)."""
@@ -92,7 +97,10 @@ def prepare_case(raw, trunk_mask, z_l1_mm, z_l3_mm,
     """
     raw        : sitk.Image in HU, as scanned
     trunk_mask : bool (z, y, x) on raw's grid, True inside the body trunk
-    z_l1_mm, z_l3_mm : physical z (LPS) of the L1 and L3 planes
+    z_l1_mm, z_l3_mm : physical z (LPS) of the L1 and L3 planes; one of them
+               may be None (a level outside the scan): the frame is then placed
+               from the other with geometry.l1_l3_mm, and the missing level's
+               axial planes are left empty (validity 0)
 
     Returns a dict of float16 arrays:
       proj   (len(fov_radii), 6, rows, cols): MIP_x, mean_x, valid_x,
@@ -101,11 +109,19 @@ def prepare_case(raw, trunk_mask, z_l1_mm, z_l3_mm,
              (value, valid)
       axial_dist (S, S): in-plane distance (mm) from the reconstruction centre,
              to apply a smaller field of view to the axial planes
-    and the scalars l1_row, l3_row (projection rows) and fov_radius_mm.
+    and the scalars l1_row, l3_row (projection rows), has_l1, has_l3 (1 or 0)
+    and fov_radius_mm.
     """
     import SimpleITK as sitk
 
     g = geometry or BodySizeGeometry()
+    if z_l1_mm is None and z_l3_mm is None:
+        raise ValueError("need the position of L1 or L3")
+    has_l1, has_l3 = z_l1_mm is not None, z_l3_mm is not None
+    if not has_l3:
+        z_l3_mm = z_l1_mm - g.l1_l3_mm          # L3 is caudal: lower z
+    if not has_l1:
+        z_l1_mm = z_l3_mm + g.l1_l3_mm
     hu = sitk.GetArrayFromImage(raw).astype(np.float32)
     imaged = (hu > OUTSIDE_FOV_HU).astype(np.float32)
     body = np.where(trunk_mask, hu, -1000.0).astype(np.float32)
@@ -163,7 +179,9 @@ def prepare_case(raw, trunk_mask, z_l1_mm, z_l3_mm,
     dz = sp[2]
     a_origin_xy = (cx - (S - 1) / 2.0 * a, cy - (S - 1) / 2.0 * a)
     axial = np.zeros((2, 3, 2, S, S), np.float32)
-    for i, z0 in enumerate((z_l1_mm, z_l3_mm)):
+    for i, (z0, has) in enumerate(((z_l1_mm, has_l1), (z_l3_mm, has_l3))):
+        if not has:
+            continue
         for j, off in enumerate((-1, 0, 1)):
             o = a_origin_xy + (z0 + off * dz,)
             v = _resample(body_im, o, (a, a, 1.0), (S, S, 1), -1000.0)[0]
@@ -177,6 +195,7 @@ def prepare_case(raw, trunk_mask, z_l1_mm, z_l3_mm,
     return dict(proj=proj, axial=axial.astype(np.float16),
                 axial_dist=axial_dist.astype(np.float16),
                 l1_row=float(g.row_of(z_l1_mm, z_l3_mm)), l3_row=float(g.l3_row),
+                has_l1=float(has_l1), has_l3=float(has_l3),
                 fov_radius_mm=float(fov_radius))
 
 

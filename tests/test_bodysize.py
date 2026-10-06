@@ -15,6 +15,7 @@ from ct25d.bodysize import (  # noqa: E402
     BodySizeDataset,
     BodySizeGeometry,
     BodySizeNet,
+    SingleLevelDataset,
     level_z_mm,
     load_bodysize,
     load_case,
@@ -153,7 +154,7 @@ def test_train_bodysize_cli(tmp_path):
     out = subprocess.run(
         [sys.executable, str(EXAMPLES / "train_bodysize.py"),
          str(tmp_path / "cases.csv"), str(tmp_path / "bs.pt"),
-         "--split-col", "split", "--epochs", "2",
+         "--split-col", "split", "--epochs", "2", "--p-drop", "0.3",
          "--warmup-epochs", "1", "--ramp-epochs", "0", "--batch-size", "2",
          "--device", "cpu"], capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
@@ -162,6 +163,8 @@ def test_train_bodysize_cli(tmp_path):
     _, _, cfg, scales, metrics = load_bodysize(tmp_path / "bs.pt")
     assert cfg["geometry"]["rows"] == 64 and set(scales) == {"height", "weight"}
     assert "test_weight_mae" in metrics
+    assert "test_L1_only_height_mae" in metrics and "test_L3_only_weight_mae" in metrics
+    assert cfg["p_drop"] == 0.3 and cfg["geometry"]["l1_l3_mm"] == 65.0
 
 
 def test_a_smaller_field_of_view_cuts_the_axial_planes_too():
@@ -177,3 +180,61 @@ def test_a_smaller_field_of_view_cuts_the_axial_planes_too():
     proj, _ = select_inputs(c, trim=(10, 40))
     assert (proj[:, :10] == 0).all() and (proj[:, 41:] == 0).all()
     assert proj[2, 10:41].max() > 0
+
+
+ONE = BodySizeGeometry(proj_mm=4.0, rows=64, cols=64, l3_row=24, axial_mm=4.0,
+                       axial_size=64, l1_l3_mm=80.0)       # 20 rows: exact shifts
+
+
+def test_one_level_places_the_frame_from_the_other():
+    img, mask = phantom()
+    only_l1 = prepare_case(img, mask, 70.0, None, geometry=ONE)
+    assert only_l1["has_l1"] == 1.0 and only_l1["has_l3"] == 0.0
+    assert only_l1["l1_row"] == pytest.approx(24 - 80 / 4.0)
+    assert not only_l1["axial"][1].any() and only_l1["axial"][0].any()
+    only_l3 = prepare_case(img, mask, None, -10.0, geometry=ONE)
+    assert only_l3["has_l1"] == 0.0 and not only_l3["axial"][0].any()
+    with pytest.raises(ValueError):
+        prepare_case(img, mask, None, None, geometry=ONE)
+
+
+def test_dropping_l3_is_what_a_scan_without_l3_gives():
+    img, mask = phantom()
+    both = prepare_case(img, mask, 70.0, -10.0, geometry=ONE)       # L1 - L3 = 80 mm
+    proj_both, ax_both = select_inputs(both, drop="L3", l1_l3_rows=20.0)
+    proj_one, ax_one = select_inputs(prepare_case(img, mask, 70.0, None, geometry=ONE))
+    assert np.allclose(proj_both, proj_one, atol=1e-2)
+    assert np.allclose(ax_both, ax_one)
+    assert not ax_both[2:].any()                                    # L3 planes empty
+    _, ax = select_inputs(both, drop="L1", l1_l3_rows=20.0)
+    assert not ax[:2].any() and ax[2:].any()
+
+
+def test_drop_augmentation_cuts_the_scan_between_the_levels():
+    c = prepare_case(*phantom(), 40.0, -10.0, geometry=SMALL)        # L1 row 11.5
+    ds = BodySizeDataset([c] * 2, np.zeros((2, 2)), augment=True, p_drop=0.3,
+                         l1_l3_rows=50 / 4.0)
+    seen = set()
+    for epoch in range(40):
+        ds.set_epoch(epoch)
+        fov, offsets, trim, drop = ds._augmentation(c, 0)
+        seen.add(drop)
+        proj, axial = ds[0][:2]
+        valid = np.flatnonzero(proj[2].numpy().max(1) > 0)
+        if drop == "L3":                       # ends above L3 (row 24 + shift)
+            shift = int(round(c["l1_row"] + 12.5 - c["l3_row"]))
+            assert valid.max() < c["l3_row"] - shift and not axial[2:].any()
+        elif drop == "L1":                     # starts below L1
+            assert valid.min() > c["l1_row"] and not axial[:2].any()
+        else:
+            assert axial[:2].any() and axial[2:].any()
+    assert seen == {None, "L1", "L3"}
+
+
+def test_single_level_evaluation_dataset():
+    c = prepare_case(*phantom(), 40.0, -10.0, geometry=SMALL)
+    for kept in ("L1", "L3"):
+        proj, axial, _ = SingleLevelDataset([c], np.zeros((1, 2)), kept, 12.5)[0]
+        missing = slice(2, 4) if kept == "L1" else slice(0, 2)
+        assert not axial[missing].any()
+        assert proj[2].max() > 0
