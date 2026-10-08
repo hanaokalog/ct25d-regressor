@@ -21,7 +21,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ct25d.bodysize import BodySizeDataset, BodySizeNet, load_case, save_bodysize
+from ct25d.bodysize import (
+    BodySizeDataset,
+    BodySizeNet,
+    SingleLevelDataset,
+    load_case,
+    save_bodysize,
+)
 from ct25d.calibration import fit_sigma_scale, uncertainty_report
 from ct25d.losses import WarmupHeteroscedasticLoss
 from ct25d.tabular import read_table, split_three
@@ -40,6 +46,10 @@ def parse_args(argv=None):
     p.add_argument("--val-frac", type=float, default=0.15)
     p.add_argument("--test-frac", type=float, default=0.15)
     p.add_argument("--no-augment", action="store_true")
+    p.add_argument("--p-drop", type=float, default=0.0,
+                   help="probability each of a training scan that misses L1 or L3 "
+                        "(its planes emptied, the scan cut between the levels); "
+                        "> 0 makes the model usable with one level")
     p.add_argument("--norm", default="group",
                    choices=["group", "batch", "instance", "none"])
     p.add_argument("--dropout", type=float, default=0.2)
@@ -105,6 +115,8 @@ def main(argv=None):
     t0 = time.time()
     cases = [load_case(p) for p in df[args.case_col]]
     geometry = json.loads(str(np.load(df[args.case_col].iloc[0])["geometry"]))
+    geometry.setdefault("l1_l3_mm", 65.0)     # cases prepared before it was recorded
+    l1_l3_rows = geometry["l1_l3_mm"] / geometry["proj_mm"]
     print(f"loaded {len(cases)} prepared cases in {time.time() - t0:.0f}s")
 
     y = df[args.targets].to_numpy(np.float64)
@@ -112,7 +124,8 @@ def main(argv=None):
     z = np.stack([stds[t].transform(y[:, k]) for k, t in enumerate(args.targets)], 1)
 
     def subset(idx, augment):
-        return BodySizeDataset([cases[i] for i in idx], z[idx], augment=augment)
+        return BodySizeDataset([cases[i] for i in idx], z[idx], augment=augment,
+                               p_drop=args.p_drop, l1_l3_rows=l1_l3_rows)
     train_ds = subset(tr, not args.no_augment)
     loader_kw = dict(batch_size=args.batch_size, num_workers=args.num_workers)
     # workers are re-created every epoch (no persistent_workers) so that
@@ -183,8 +196,17 @@ def main(argv=None):
         mu_t, sd_t, _ = predict_z(model, test_loader, args.device)
         metrics.update(report("test", "test (held out, reported once)", mu_t, sd_t,
                               scales, stds, y[te], args.targets))
+        if args.p_drop > 0:
+            for kept in ("L1", "L3"):
+                one = SingleLevelDataset([cases[i] for i in te], z[te], kept,
+                                         l1_l3_rows)
+                mu_k, sd_k, _ = predict_z(model, DataLoader(one, **loader_kw),
+                                          args.device)
+                title = f"test, {kept} only (the scan cut halfway between L1 and L3)"
+                metrics.update(report(f"test_{kept}_only", title, mu_k, sd_k,
+                                      scales, stds, y[te], args.targets))
     config = dict(model=model_cfg, targets=list(args.targets), geometry=geometry,
-                  best_epoch=best["epoch"])
+                  best_epoch=best["epoch"], p_drop=args.p_drop)
     args.model_out.parent.mkdir(parents=True, exist_ok=True)
     save_bodysize(args.model_out, model, stds, config, scales, metrics)
     print(f"wrote {args.model_out}")
