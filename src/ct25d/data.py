@@ -2,7 +2,8 @@
 
 The order of operations matters and is fixed here:
 
-    augment (HU domain, binary mask)
+    z-shift variant (thin-slice cases; a random one of the precomputed shifts)
+        -> augment (HU domain, binary mask)
         -> HU shift (one uniform offset per case, image channels only)
         -> recompute the distance gate from the AUGMENTED mask
         -> window to [0, 1], gate, rescale to [-1, 1]
@@ -40,6 +41,11 @@ class SliceStackDataset(Dataset):
                    calibration drift between scanners and the enhancement a
                    contrast phase adds, so a model that should not depend on
                    the phase cannot learn the absolute HU level. 0 disables.
+    z_variants   : None, or a list aligned with `stacks` holding None or a
+                   (K, S, H, W) array of the image planes built at K z shifts
+                   (prepare_stacks(z_shifts_mm=...)). Each draw then uses the
+                   original planes or one of the K shifted ones, uniformly; the
+                   mask channel is not shifted. Training only.
     task         : 'regression' returns the standardized target; 'classification'
                    returns the class index as a long tensor and ignores the
                    standardizer, which may be None.
@@ -61,6 +67,7 @@ class SliceStackDataset(Dataset):
         keep_context: bool = False,
         hu_shift: float = 0.0,
         task: str = "regression",
+        z_variants=None,
     ):
         if task not in ("regression", "classification"):
             raise ValueError(f"unknown task: {task}")
@@ -77,6 +84,9 @@ class SliceStackDataset(Dataset):
         self.keep_context = keep_context
         self.hu_shift = float(hu_shift)
         self.task = task
+        if z_variants is not None and len(z_variants) != len(self.targets):
+            raise ValueError("z_variants must be aligned with stacks")
+        self.z_variants = z_variants
 
     def __len__(self) -> int:
         return len(self.targets)
@@ -92,6 +102,12 @@ class SliceStackDataset(Dataset):
     def __getitem__(self, i):
         x = torch.as_tensor(np.asarray(self.stacks[i]), dtype=torch.float32).clone()
         y = float(self.targets[i])
+
+        var = None if self.z_variants is None else self.z_variants[i]
+        if var is not None:
+            k = int(torch.randint(len(var) + 1, ()))   # 0 = the unshifted planes
+            if k:
+                x[:-1] = torch.as_tensor(np.asarray(var[k - 1]), dtype=torch.float32)
 
         if self.augment is not None:
             x, scale = self.augment(x)          # HU domain; mask stays binary

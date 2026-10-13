@@ -137,6 +137,7 @@ Other options worth knowing:
 | `--encoding` | CSV encoding; by default UTF-8, UTF-8 with BOM and CP932 are tried in turn, and spaces around values are stripped |
 | `--path-map OLD=NEW` | rewrite a path prefix in the image and mask columns, e.g. a table written on another machine |
 | `--hu-shift X` | add one uniform offset in [-X, X] HU per case before windowing (training only), e.g. to make a model robust to contrast enhancement |
+| `--z-shift-mm X` | for volumes with slice spacing below `--z-shift-below-mm` (default 5), also build the image planes shifted by up to ±X mm along the slice axis in `--z-shift-step` steps (default 1) and train on a random one per draw; the mask stays on the labelled slice. Models the uncertainty in which thin slice carries the label. Training only; the shifted planes are cached with the stacks |
 | `--prep-workers N` | read and resample the volumes in N processes (identical result; reading dominates on network storage) |
 
 Spreadsheet placeholders in the target column (`#N/A`, `FALSE`, empty) are

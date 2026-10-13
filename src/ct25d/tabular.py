@@ -90,10 +90,13 @@ def prepare_stacks(
     crop_size: int = 96,
     verbose: bool = True,
     workers: int = 1,
+    z_shifts_mm=(),
+    z_shift_below_mm: float = 5.0,
     **build_kwargs,
 ):
     """
-    Returns (stacks, kept, failures).
+    Returns (stacks, kept, failures), or with `z_shifts_mm`
+    (stacks, kept, failures, variants).
 
     stacks   : (n_kept, n_slices + 1, crop_size, crop_size) float32, in HU
     kept     : positional indices into `df` of the rows that succeeded
@@ -106,6 +109,14 @@ def prepare_stacks(
 
     `workers` > 1 reads and resamples the rows in that many processes; reading
     dominates on network storage. The result is the same as with one.
+
+    z_shifts_mm : non-zero through-plane shifts (e.g. -2, -1, 1, 2) for the
+               z-shift augmentation. For volumes whose slice spacing is below
+               `z_shift_below_mm` (thin slices, where the labelled slice is one
+               of several that show the level), the image planes are also built
+               at each shift; the mask stays on the labelled slice. `variants`
+               is aligned with `stacks`: None for the other volumes, otherwise
+               (len(z_shifts_mm), n_slices, H, W) float32.
     """
     if crop_size is None:
         raise ValueError(
@@ -116,7 +127,9 @@ def prepare_stacks(
             raise KeyError(f"column {col!r} not in the CSV "
                            f"(columns: {list(df.columns)})")
 
-    jobs = [(str(row[image_col]), str(row[mask_col]), crop_size, build_kwargs)
+    shifts = tuple(float(v) for v in z_shifts_mm if float(v) != 0.0)
+    jobs = [(str(row[image_col]), str(row[mask_col]), crop_size, build_kwargs,
+             shifts, z_shift_below_mm)
             for _, row in df.iterrows()]
     if workers > 1:
         import multiprocessing
@@ -130,11 +143,13 @@ def prepare_stacks(
         pool = None
         results = map(_prepare_one, jobs)
 
-    stacks, kept, failures = [], [], []
+    stacks, kept, failures, variants = [], [], [], []
     try:
         for pos, (idx, (stack, err)) in enumerate(zip(df.index, results)):
             if err is None:
+                stack, var = stack
                 stacks.append(stack)
+                variants.append(var)
                 kept.append(pos)
             else:
                 failures.append((idx, err))
@@ -152,20 +167,35 @@ def prepare_stacks(
             print(f"    {idx}: {why}")
         if len(failures) > 10:
             print(f"    ... and {len(failures) - 10} more")
+    if shifts:
+        if verbose:
+            n = sum(v is not None for v in variants)
+            print(f"  z-shift variants {list(shifts)} mm for {n}/{len(stacks)} "
+                  f"volumes with slice spacing < {z_shift_below_mm} mm")
+        return np.stack(stacks), np.asarray(kept), failures, variants
     return np.stack(stacks), np.asarray(kept), failures
 
 
 def _prepare_one(job):
-    """(stack, None) or (None, reason) for one row; top level so it pickles."""
+    """((stack, variants), None) or (None, reason) for one row; top level so it
+    pickles. variants is None unless shifts are asked for and the slices are
+    thin."""
     import SimpleITK as sitk
 
     from .geometry import build_sample_sitk
 
-    image_path, mask_path, crop_size, build_kwargs = job
+    image_path, mask_path, crop_size, build_kwargs, shifts, below_mm = job
     try:
         img = sitk.ReadImage(image_path)
         lab = sitk.ReadImage(mask_path)
-        return build_sample_sitk(img, lab, crop_size=crop_size, **build_kwargs), None
+        stack = build_sample_sitk(img, lab, crop_size=crop_size, **build_kwargs)
+        var = None
+        if shifts and img.GetSpacing()[2] < below_mm - 1e-3:
+            n = stack.shape[0] - 1
+            var = np.stack([build_sample_sitk(img, lab, crop_size=crop_size,
+                                              z_shift_mm=d, **build_kwargs)[:n]
+                            for d in shifts])
+        return (stack, var), None
     except Exception as err:                           # noqa: BLE001
         return None, f"{type(err).__name__}: {err}"
 
@@ -261,15 +291,23 @@ def split_three(
             np.flatnonzero(which == 2))
 
 
-def save_stack_cache(path, stacks, kept, prep: dict) -> None:
-    """Write prepared stacks together with the settings that produced them."""
+def save_stack_cache(path, stacks, kept, prep: dict, variants=None) -> None:
+    """Write prepared stacks together with the settings that produced them
+    (and the z-shift variants, if any: see prepare_stacks)."""
+    extra = {}
+    if variants is not None:
+        pos = [i for i, v in enumerate(variants) if v is not None]
+        extra = dict(variant_pos=np.asarray(pos, dtype=np.int64),
+                     variants=(np.stack([variants[i] for i in pos]) if pos
+                               else np.zeros((0,), np.float32)))
     np.savez_compressed(path, stacks=stacks, kept=kept,
-                        prep=np.array(json.dumps(prep, sort_keys=True)))
+                        prep=np.array(json.dumps(prep, sort_keys=True)), **extra)
 
 
-def load_stack_cache(path, prep: dict):
+def load_stack_cache(path, prep: dict, with_variants: bool = False):
     """
-    Returns (stacks, kept) from a cache written with the same settings.
+    Returns (stacks, kept) from a cache written with the same settings, or
+    (stacks, kept, variants) with `with_variants`.
 
     A cache is only valid for the preprocessing that wrote it, and a stale one
     is silent: the arrays load fine and the model trains on, or is evaluated
@@ -289,4 +327,10 @@ def load_stack_cache(path, prep: dict):
         raise ValueError(
             f"{path} was written with different preprocessing settings "
             f"(cached, requested): {diff}; delete it or point --cache elsewhere")
-    return z["stacks"], z["kept"]
+    if not with_variants:
+        return z["stacks"], z["kept"]
+    variants = [None] * len(z["stacks"])
+    if "variant_pos" in z.files:
+        for j, i in enumerate(z["variant_pos"]):
+            variants[int(i)] = z["variants"][j]
+    return z["stacks"], z["kept"], variants

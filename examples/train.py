@@ -141,6 +141,14 @@ def parse_args(argv=None):
     g.add_argument("--hu-shift", type=float, default=0.0,
                    help="add one uniform offset in [-x, +x] HU per case to the "
                         "whole image before windowing (training only)")
+    g.add_argument("--z-shift-mm", type=float, default=0.0,
+                   help="for thin-slice volumes (spacing < --z-shift-below-mm), "
+                        "also build the image planes shifted up to +-x mm along "
+                        "the slice axis, in --z-shift-step steps, and train on a "
+                        "random one of them per draw; the mask stays on the "
+                        "labelled slice. 0 disables. Training split only")
+    g.add_argument("--z-shift-step", type=float, default=1.0)
+    g.add_argument("--z-shift-below-mm", type=float, default=5.0)
 
     g = p.add_argument_group("model and optimization")
     g.add_argument("--arch", default="resnet18", choices=["resnet18", "resnet34"])
@@ -163,30 +171,46 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def z_shifts(args):
+    """The non-zero shifts in mm, e.g. (-2, -1, 1, 2) for 2 mm in 1 mm steps."""
+    if args.z_shift_mm <= 0 or args.no_augment:
+        return ()
+    n = int(round(args.z_shift_mm / args.z_shift_step))
+    return tuple(float(k * args.z_shift_step) for k in range(-n, n + 1) if k)
+
+
 def load_or_prepare(df, args):
-    """Resampling dominates the wall clock, so cache it."""
+    """Resampling dominates the wall clock, so cache it. Returns (stacks, kept,
+    variants); variants is None without --z-shift-mm."""
     prep = dict(image_col=args.image_col, mask_col=args.mask_col,
                 crop_size=args.crop_size, n_slices=args.n_slices,
                 gap_mm=args.gap_mm, slab_mm=args.slab_mm,
                 in_plane_mm=args.in_plane_mm, label_value=args.label_value)
+    shifts = z_shifts(args)
+    if shifts:   # recorded only when used, so older caches stay valid
+        prep.update(z_shifts_mm=list(shifts), z_shift_below_mm=args.z_shift_below_mm)
     if args.cache is not None and args.cache.exists():
         try:
-            stacks, kept = load_stack_cache(args.cache, prep)
+            out = load_stack_cache(args.cache, prep, with_variants=bool(shifts))
         except ValueError as err:
             sys.exit(f"[error] {err}")
         print(f"loaded cached stacks from {args.cache}")
-        return stacks, kept
+        return (out[0], out[1], out[2]) if shifts else (out[0], out[1], None)
 
     print(f"preparing {len(df)} cases ...")
     t0 = time.time()
-    stacks, kept, _ = prepare_stacks(df, workers=args.prep_workers, **prep)
+    build = {k: v for k, v in prep.items() if k not in ("z_shifts_mm", "z_shift_below_mm")}
+    out = prepare_stacks(df, workers=args.prep_workers, z_shifts_mm=shifts,
+                         z_shift_below_mm=args.z_shift_below_mm, **build)
+    stacks, kept = out[0], out[1]
+    variants = out[3] if shifts else None
     print(f"  {len(kept)}/{len(df)} usable, {time.time() - t0:.0f}s, "
           f"stack {stacks.shape[1:]}")
     if args.cache is not None:
         args.cache.parent.mkdir(parents=True, exist_ok=True)
-        save_stack_cache(args.cache, stacks, kept, prep)
+        save_stack_cache(args.cache, stacks, kept, prep, variants=variants)
         print(f"  cached to {args.cache}")
-    return stacks, kept
+    return stacks, kept, variants
 
 
 def check_field_of_view(stacks, args):
@@ -296,7 +320,7 @@ def main(argv=None):
     classify = args.task == "classification"
 
     df = load_table(args)
-    stacks, kept = load_or_prepare(df, args)
+    stacks, kept, variants = load_or_prepare(df, args)
     df = df.iloc[kept].reset_index(drop=True)
     targets = df[args.target].to_numpy(dtype=np.float64)
 
@@ -347,7 +371,14 @@ def main(argv=None):
                   task=args.task)
     train_ds = SliceStackDataset(stacks[tr], targets[tr], augment=aug,
                                  target_scale_power=args.target_power,
-                                 hu_shift=args.hu_shift, **common)
+                                 hu_shift=args.hu_shift,
+                                 z_variants=(None if variants is None
+                                             else [variants[i] for i in tr]),
+                                 **common)
+    if variants is not None:
+        print(f"z-shift {list(z_shifts(args))} mm: "
+              f"{sum(variants[i] is not None for i in tr)}/{len(tr)} training "
+              f"cases with slice spacing < {args.z_shift_below_mm} mm")
     val_ds = SliceStackDataset(stacks[va], targets[va], augment=None,
                                target_scale_power=0, **common)
     test_ds = (SliceStackDataset(stacks[te], targets[te], augment=None,
@@ -391,6 +422,7 @@ def main(argv=None):
             z_offsets_mm=(list(gate.z_offsets_mm) if gate.z_offsets_mm else None))),
         log_target=bool(args.log_target), target_power=args.target_power,
         hu_shift=args.hu_shift, n_classes=n_classes,
+        z_shifts_mm=list(z_shifts(args)), z_shift_below_mm=args.z_shift_below_mm,
     )
 
     loaders = dict(train=train_loader, val=val_loader, test=test_loader)

@@ -223,6 +223,7 @@ def build_sample_sitk(
     center_on_mask: bool = True,
     default_value: float = AIR_HU,
     mask_threshold: float = 0.5,
+    z_shift_mm: float = 0.0,
 ) -> np.ndarray:
     """
     image      : 3D sitk.Image (CT volume)
@@ -233,6 +234,9 @@ def build_sample_sitk(
                  on the plane, so thin-slice volumes give the same planes as
                  the same anatomy at 5 mm (see slab_offsets_mm). None or 0
                  takes the single interpolated plane instead.
+    z_shift_mm : move the image planes (not the mask) this far along the
+                 slice axis -- augmentation for the uncertainty in which slice
+                 the label was put on. 0 for evaluation and inference.
     returns    : (n_slices + 1, H, W) float32, HU values untouched
 
     The centre slice is taken from the mask unless `center_index` is given.
@@ -277,7 +281,7 @@ def build_sample_sitk(
     for off in offsets:
         acc = np.zeros((oh, ow), dtype=np.float64)
         for s in sub:
-            z = float(np.clip(cz + (off + s) / sz, 0.0, Z - 1))
+            z = float(np.clip(cz + (off + s + z_shift_mm) / sz, 0.0, Z - 1))
             p = image.TransformContinuousIndexToPhysicalPoint((cx, cy, z))
             acc += _resample_plane(image, p, (ow, oh), direction, in_plane_mm,
                                    sitk.sitkLinear, default_value)

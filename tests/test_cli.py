@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 sitk = pytest.importorskip("SimpleITK")
 torch = pytest.importorskip("torch")
@@ -217,3 +218,18 @@ def test_classification_with_a_test_split_and_cp932_csv(cohort, tmp_path):
     r = Predictor(model).predict(sitk.ReadImage(row["ct"]), sitk.ReadImage(row["seg"]))
     assert r["pred"] == row["pred"]
     assert np.allclose(r["probs"], row[["prob_0", "prob_1"]].to_numpy(float), atol=1e-5)
+
+
+def test_z_shift_augmentation_trains_and_caches(cohort, tmp_path):
+    model, cache = tmp_path / "z.pt", tmp_path / "z.npz"
+    argv = [str(cohort), "area_mm2", str(model), "--image-col", "ct",
+            "--mask-col", "seg", "--group-col", "patient_id", "--crop-size", "48",
+            "--epochs", "2", "--batch-size", "4", "--val-frac", "0.3",
+            "--z-shift-mm", "2", "--cache", str(cache), "--device", "cpu"]
+    log = run("train.py", argv)
+    assert "z-shift [-2.0, -1.0, 1.0, 2.0] mm" in log
+    log = run("train.py", argv)                       # second run reads the cache
+    assert "loaded cached stacks" in log and "z-shift" in log
+    ckpt = torch.load(model, map_location="cpu", weights_only=False)
+    cfg = ckpt.get("config", ckpt)
+    assert cfg["z_shifts_mm"] == [-2.0, -1.0, 1.0, 2.0]
