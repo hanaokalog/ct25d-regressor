@@ -133,6 +133,7 @@ Other options worth knowing:
 |---|---|
 | `--task classification --n-classes K` | integer labels 0..K-1, cross-entropy head, temperature scaling on the validation split; `eval.py` writes `pred`, `pred_conf`, `prob_0..K-1` |
 | `--label-smoothing` | for the classification loss |
+| `--class-weights` | classification loss weights: `none` (default), `balanced` (inverse training frequency), `sqrt` (its square root) or a comma list; scaled to mean 1 over the training cases. The best epoch is then chosen by the weighted val NLL; the weights are stored in the checkpoint config |
 | `--test-frac`, `--split-col`, `--split-out` | a held-out test split reported once after training; or a fixed `train`/`val`/`test` column; and the split actually used, written to a CSV |
 | `--encoding` | CSV encoding; by default UTF-8, UTF-8 with BOM and CP932 are tried in turn, and spaces around values are stripped |
 | `--path-map OLD=NEW` | rewrite a path prefix in the image and mask columns, e.g. a table written on another machine |

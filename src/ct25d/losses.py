@@ -1,12 +1,36 @@
-"""Gaussian negative log-likelihood, with a Huber warmup schedule."""
+"""Gaussian negative log-likelihood, with a Huber warmup schedule; class weights for classification."""
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["GaussianNLL", "WarmupHeteroscedasticLoss"]
+__all__ = ["GaussianNLL", "WarmupHeteroscedasticLoss", "class_weights"]
+
+
+def class_weights(spec: str, counts) -> np.ndarray | None:
+    """Per-class loss weights from the training class counts.
+
+    spec: "none" (None), "balanced" (inverse frequency), "sqrt" (square root of
+    that, a milder push), or a comma list such as "1,1,1,1,2,1". A class with no
+    training case gets 0. The weights are scaled so that the mean weight over the
+    training cases is 1, which keeps the loss (and the learning rate) on the
+    unweighted scale.
+    """
+    counts = np.asarray(counts, dtype=float)
+    if spec in (None, "", "none"):
+        return None
+    if spec in ("balanced", "sqrt"):
+        w = np.where(counts > 0, counts.sum() / (len(counts) * np.maximum(counts, 1)), 0.0)
+        if spec == "sqrt":
+            w = np.sqrt(w)
+    else:
+        w = np.array([float(v) for v in spec.split(",")])
+        if len(w) != len(counts) or (w < 0).any():
+            raise ValueError(f"class weights {spec!r}: need {len(counts)} non-negative values")
+    return w * counts.sum() / max((w * counts).sum(), 1e-12)
 
 
 class GaussianNLL(nn.Module):

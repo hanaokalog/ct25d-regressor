@@ -233,3 +233,20 @@ def test_z_shift_augmentation_trains_and_caches(cohort, tmp_path):
     ckpt = torch.load(model, map_location="cpu", weights_only=False)
     cfg = ckpt.get("config", ckpt)
     assert cfg["z_shifts_mm"] == [-2.0, -1.0, 1.0, 2.0]
+
+
+def test_classification_with_class_weights(cohort, tmp_path):
+    df = pd.read_csv(cohort)
+    df["klass"] = (df["area_mm2"] > df["area_mm2"].quantile(0.75)).astype(int)
+    csv = tmp_path / "cw.csv"
+    df.to_csv(csv, index=False)
+    model = tmp_path / "cw.pt"
+    log = run("train.py", [
+        str(csv), "klass", str(model), "--task", "classification",
+        "--image-col", "ct", "--mask-col", "seg", "--group-col", "patient_id",
+        "--crop-size", "48", "--epochs", "2", "--batch-size", "4",
+        "--class-weights", "balanced", "--device", "cpu"])
+    assert "class weights (balanced)" in log
+    ck = torch.load(str(model), map_location="cpu", weights_only=True)
+    cw = ck["config"]["class_weights"]
+    assert len(cw) == 2 and cw[1] > cw[0]

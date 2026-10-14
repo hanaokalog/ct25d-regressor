@@ -44,7 +44,7 @@ from ct25d.constants import CT_WINDOW, SLAB_MM, SLICE_GAP_MM, TARGET_INPLANE_MM
 from ct25d.data import SliceStackDataset
 from ct25d.gating import DistanceGate
 from ct25d.geometry import required_patch_size
-from ct25d.losses import WarmupHeteroscedasticLoss
+from ct25d.losses import WarmupHeteroscedasticLoss, class_weights
 from ct25d.tabular import (
     apply_path_map,
     load_stack_cache,
@@ -125,6 +125,11 @@ def parse_args(argv=None):
                    help="number of classes for --task classification "
                         "(default: max label + 1)")
     g.add_argument("--label-smoothing", type=float, default=0.0)
+    g.add_argument("--class-weights", default="none",
+                   help="classification loss weights: none, balanced (inverse "
+                        "training frequency), sqrt (its square root) or a comma "
+                        "list; scaled to mean 1 over the training cases. The "
+                        "best epoch is then chosen by the weighted val NLL")
     g.add_argument("--log-target", action="store_true",
                    help="standardize log1p(y); for positive, right-skewed targets")
     g.add_argument("--target-power", type=int, default=0, choices=[0, 1, 2],
@@ -343,9 +348,12 @@ def main(argv=None):
             sys.exit(f"[error] label {int(targets.max())} >= --n-classes {n_classes}")
         counts = np.bincount(targets[tr].astype(int), minlength=n_classes)
         print(f"classes {n_classes}, train counts {counts.tolist()}")
+        cw = class_weights(args.class_weights, counts)
+        if cw is not None:
+            print(f"class weights ({args.class_weights}): {np.round(cw, 3).tolist()}")
         std = None
     else:
-        n_classes = 0
+        n_classes, cw = 0, None
         print(f"target {args.target}: {targets.min():.4g} .. {targets.max():.4g}, "
               f"median {np.median(targets):.4g}")
         # Fitted on the training split only; a standardizer that has seen the
@@ -422,13 +430,15 @@ def main(argv=None):
             z_offsets_mm=(list(gate.z_offsets_mm) if gate.z_offsets_mm else None))),
         log_target=bool(args.log_target), target_power=args.target_power,
         hu_shift=args.hu_shift, n_classes=n_classes,
+        **({"class_weights": [round(float(v), 4) for v in cw]}
+           if classify and cw is not None else {}),
         z_shifts_mm=list(z_shifts(args)), z_shift_below_mm=args.z_shift_below_mm,
     )
 
     loaders = dict(train=train_loader, val=val_loader, test=test_loader)
     if classify:
         train_classifier(model, opt, sched, loaders, config, args, n_classes,
-                         sizes=(len(tr), len(va), len(te)))
+                         sizes=(len(tr), len(va), len(te)), weights=cw)
     else:
         train_regressor(model, opt, sched, loaders, std, config, args, targets,
                         va, te, sizes=(len(tr), len(va), len(te)))
@@ -534,8 +544,20 @@ def train_regressor(model, opt, sched, loaders, std, config, args, targets,
                          if "test_mae" in metrics else {})}, indent=None))
 
 
-def train_classifier(model, opt, sched, loaders, config, args, n_classes, sizes):
-    crit = torch.nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+def weighted_nll(probs, labels, weights):
+    """mean NLL with per-class weights (sum w_y * nll / sum w_y), as the loss"""
+    y = np.asarray(labels, dtype=int)
+    w = np.asarray(weights)[y]
+    nll = -np.log(np.clip(probs[np.arange(len(y)), y], 1e-12, 1.0))
+    return float((w * nll).sum() / max(w.sum(), 1e-12))
+
+
+def train_classifier(model, opt, sched, loaders, config, args, n_classes, sizes,
+                     weights=None):
+    crit = torch.nn.CrossEntropyLoss(
+        weight=None if weights is None else torch.as_tensor(weights, dtype=torch.float32,
+                                                            device=args.device),
+        label_smoothing=args.label_smoothing)
     best = {"nll": float("inf"), "epoch": -1}
     best_state = None
     for epoch in range(args.epochs):
@@ -553,6 +575,8 @@ def train_classifier(model, opt, sched, loaders, config, args, n_classes, sizes)
 
         logits, y_val = evaluate_logits(model, loaders["val"], args.device)
         rep = classification_report(softmax_np(logits), y_val)
+        if weights is not None:
+            rep["nll"] = weighted_nll(softmax_np(logits), y_val, weights)
         mark = ""
         if rep["nll"] < best["nll"]:
             best = {"nll": rep["nll"], "epoch": epoch, "accuracy": rep["accuracy"]}

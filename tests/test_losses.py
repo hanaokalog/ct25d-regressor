@@ -81,3 +81,18 @@ def test_loss_is_finite_at_the_clamp_extremes():
         loss = GaussianNLL()(torch.zeros(4, 1), torch.full((4, 1), lv),
                              torch.ones(4, 1))
         assert torch.isfinite(loss)
+
+
+def test_class_weights():
+    from ct25d.losses import class_weights
+    counts = [400, 100, 0, 100]
+    assert class_weights("none", counts) is None
+    w = class_weights("balanced", counts)
+    assert w[2] == 0 and np.isclose(w[1], 4 * w[0]) and np.isclose(w[1], w[3])
+    assert np.isclose((w * counts).sum(), sum(counts))           # mean 1 per case
+    s = class_weights("sqrt", counts)
+    assert np.isclose(s[1], 2 * s[0]) and np.isclose((s * counts).sum(), sum(counts))
+    e = class_weights("1,2,1,2", counts)
+    assert np.isclose(e[1], 2 * e[0]) and np.isclose((e * counts).sum(), sum(counts))
+    with pytest.raises(ValueError):
+        class_weights("1,2", counts)
