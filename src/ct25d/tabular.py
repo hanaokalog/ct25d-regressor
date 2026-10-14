@@ -327,10 +327,13 @@ def load_stack_cache(path, prep: dict, with_variants: bool = False):
         raise ValueError(
             f"{path} was written with different preprocessing settings "
             f"(cached, requested): {diff}; delete it or point --cache elsewhere")
+    # every z[name] reads (and decompresses) the whole array again: read each once
+    stacks, kept = z["stacks"], z["kept"]
     if not with_variants:
-        return z["stacks"], z["kept"]
-    variants = [None] * len(z["stacks"])
+        return stacks, kept
+    variants = [None] * len(stacks)
     if "variant_pos" in z.files:
+        allv = z["variants"]
         for j, i in enumerate(z["variant_pos"]):
-            variants[int(i)] = z["variants"][j]
-    return z["stacks"], z["kept"], variants
+            variants[int(i)] = allv[j]
+    return stacks, kept, variants
