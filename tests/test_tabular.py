@@ -30,3 +30,26 @@ def test_cache_without_settings_is_refused(tmp_path):
     np.savez_compressed(path, stacks=np.zeros((1, 4, 8, 8)), kept=np.array([0]))
     with pytest.raises(ValueError, match="older version"):
         load_stack_cache(path, PREP)
+
+
+def test_flip_col_reverses_the_slices_of_marked_rows(tmp_path):
+    sitk = pytest.importorskip("SimpleITK")
+    pd = pytest.importorskip("pandas")
+    from conftest import make_case
+    from ct25d.tabular import is_true, prepare_stacks
+
+    # slice k holds 100 k; the label sits on slice 12 of 40, so the reversed
+    # volume puts it on slice 27 and the planes there hold 100 * 12 again,
+    # but the plane above / below swap
+    img, lab, _ = make_case(size=(64, 64, 40), z_spacing=5.0, center_index=12)
+    ip, mp = tmp_path / "i.nii.gz", tmp_path / "m.nii.gz"
+    sitk.WriteImage(img, str(ip)); sitk.WriteImage(lab, str(mp))
+    df = pd.DataFrame(dict(image=[str(ip)] * 3, mask=[str(mp)] * 3, flip=["1", 0, "true"]))
+    s, kept, _ = prepare_stacks(df, crop_size=32, slab_mm=0, verbose=False, flip_col="flip")
+    assert np.allclose(s[0, 1], s[1, 1]) and np.allclose(s[0, 3], s[1, 3])      # centre plane, mask
+    assert np.allclose(s[0, 0], s[1, 2]) and np.allclose(s[0, 2], s[1, 0])      # neighbours swapped
+    assert np.allclose(s[0], s[2])
+    with pytest.raises(KeyError):
+        prepare_stacks(df, crop_size=32, verbose=False, flip_col="nope")
+    assert [is_true(v) for v in (1, "1", "TRUE", "yes", 0, "0", "", np.nan, None)] == \
+        [True] * 4 + [False] * 5

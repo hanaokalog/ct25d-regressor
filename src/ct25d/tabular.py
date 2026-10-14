@@ -92,6 +92,7 @@ def prepare_stacks(
     workers: int = 1,
     z_shifts_mm=(),
     z_shift_below_mm: float = 5.0,
+    flip_col: str | None = None,
     **build_kwargs,
 ):
     """
@@ -117,6 +118,11 @@ def prepare_stacks(
                at each shift; the mask stays on the labelled slice. `variants`
                is aligned with `stacks`: None for the other volumes, otherwise
                (len(z_shifts_mm), n_slices, H, W) float32.
+
+    flip_col : a column marking rows (1 / true) whose image and mask are read
+               with the slice order reversed (header kept), e.g. volumes stored
+               feet first, so the planes come in the head-first index order
+               that inference sees after such volumes are reoriented.
     """
     if crop_size is None:
         raise ValueError(
@@ -128,8 +134,11 @@ def prepare_stacks(
                            f"(columns: {list(df.columns)})")
 
     shifts = tuple(float(v) for v in z_shifts_mm if float(v) != 0.0)
+    if flip_col is not None and flip_col not in df.columns:
+        raise KeyError(f"column {flip_col!r} not in the CSV")
     jobs = [(str(row[image_col]), str(row[mask_col]), crop_size, build_kwargs,
-             shifts, z_shift_below_mm)
+             shifts, z_shift_below_mm,
+             flip_col is not None and is_true(row[flip_col]))
             for _, row in df.iterrows()]
     if workers > 1:
         import multiprocessing
@@ -176,6 +185,26 @@ def prepare_stacks(
     return np.stack(stacks), np.asarray(kept), failures
 
 
+def is_true(v) -> bool:
+    """1 / true / yes (any case) or a non-zero number; blank and NaN are false"""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "1.0", "true", "yes")
+    try:
+        return bool(v) and not np.isnan(float(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def reverse_slices(image):
+    """the same volume with its slice (k) order reversed; the header is kept"""
+    import SimpleITK as sitk
+
+    out = sitk.GetImageFromArray(sitk.GetArrayFromImage(image)[::-1].copy(),
+                                 isVector=image.GetNumberOfComponentsPerPixel() > 1)
+    out.CopyInformation(image)
+    return out
+
+
 def _prepare_one(job):
     """((stack, variants), None) or (None, reason) for one row; top level so it
     pickles. variants is None unless shifts are asked for and the slices are
@@ -184,10 +213,12 @@ def _prepare_one(job):
 
     from .geometry import build_sample_sitk
 
-    image_path, mask_path, crop_size, build_kwargs, shifts, below_mm = job
+    image_path, mask_path, crop_size, build_kwargs, shifts, below_mm, flip = job
     try:
         img = sitk.ReadImage(image_path)
         lab = sitk.ReadImage(mask_path)
+        if flip:
+            img, lab = reverse_slices(img), reverse_slices(lab)
         stack = build_sample_sitk(img, lab, crop_size=crop_size, **build_kwargs)
         var = None
         if shifts and img.GetSpacing()[2] < below_mm - 1e-3:

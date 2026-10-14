@@ -54,6 +54,8 @@ def parse_args(argv=None):
                    help="write per-case predictions here (default: <csv>.pred.csv)")
     p.add_argument("--image-col", default=None, help="override the trained column")
     p.add_argument("--mask-col", default=None, help="override the trained column")
+    p.add_argument("--flip-col", default=None,
+                   help="column marking rows (1/true) read with the slice order reversed")
     p.add_argument("--prep-workers", type=int, default=1,
                    help="processes that read and resample the volumes")
     p.add_argument("--cache", type=Path, default=None)
@@ -140,6 +142,8 @@ def main(argv=None):
                 # checkpoints from before slab averaging took a single plane
                 slab_mm=cfg.get("slab_mm", 0.0),
                 label_value=cfg["label_value"])
+    if args.flip_col:
+        prep.update(flip_col=args.flip_col)
     if args.cache is not None and args.cache.exists():
         try:
             stacks, kept = load_stack_cache(args.cache, prep)

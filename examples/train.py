@@ -67,6 +67,9 @@ def parse_args(argv=None):
     g = p.add_argument_group("columns")
     g.add_argument("--image-col", default="image")
     g.add_argument("--mask-col", default="mask")
+    g.add_argument("--flip-col", default=None,
+                   help="column marking rows (1/true) read with the slice order "
+                        "reversed, e.g. feet-first volumes")
     g.add_argument("--group-col", default=None,
                    help="split over these groups (e.g. patient_id) to avoid leakage")
     g.add_argument("--split-col", default=None,
@@ -191,6 +194,8 @@ def load_or_prepare(df, args):
                 crop_size=args.crop_size, n_slices=args.n_slices,
                 gap_mm=args.gap_mm, slab_mm=args.slab_mm,
                 in_plane_mm=args.in_plane_mm, label_value=args.label_value)
+    if args.flip_col:   # recorded only when used, so older caches stay valid
+        prep.update(flip_col=args.flip_col)
     shifts = z_shifts(args)
     if shifts:   # recorded only when used, so older caches stay valid
         prep.update(z_shifts_mm=list(shifts), z_shift_below_mm=args.z_shift_below_mm)
